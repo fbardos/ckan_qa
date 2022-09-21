@@ -1,19 +1,28 @@
+import inspect
 import io
 import json
 import logging
 import os
+import sys
 from abc import ABC
+from multiprocessing import Value
 from typing import List, Optional, Tuple
 
 import great_expectations as ge
 import pandas as pd
 import requests
+from great_expectations.core.expectation_validation_result import \
+    ExpectationSuiteValidationResult
 
-from airflow.exceptions import AirflowException
 from airflow.models.baseoperator import BaseOperator
+from airflow.providers.mongo.hooks.mongo import MongoHook
 from airflow.providers.sftp.hooks.sftp import SFTPHook
+from airflow.utils.context import Context
 
-_DEFAULT_SFTP_CONN_ID = 'sftp_bucket'
+# Use relative path for custom modules (easier to handle with airflow deployment atm)
+sys.path.append(os.path.dirname(os.path.abspath(os.path.join(__file__, '../ckanqa'))))
+from ckanqa.constant import (DEFAULT_MONGO_CONN_ID, DEFAULT_SFTP_CONN_ID,
+                             RESULT_INSERT_COLLECTION)
 
 
 class ExpectationMixin(ABC):
@@ -59,39 +68,58 @@ class ExpectationMixin(ABC):
             sftp_client.close_conn()
         return ge_objs
 
-    def apply_expectations(self, method_name: str, **kwargs):
-        """Applies expectation from GreatExpectations."""
+    def apply_expectations(self, method_name: str, **kwargs) -> List[Tuple[str, pd.DataFrame, ExpectationSuiteValidationResult]]:
+        """Applies expectation from GreatExpectations.
+
+        Returns:
+            A list with Tuples (CSV name, loaded dataframe and ExpectationSuiteValidationResult object)
+            with the results of the test.
+
+        """
         ge_dfs = self.load_csv_as_dataframe_from_nas()
         results = []
         for df in ge_dfs:
             res = getattr(df[1], method_name)(**kwargs)
-            results.append((df[0], res))
+            results.append((df[0], df[1], res))
+        return results
+
+    def log_results(self, results: List[Tuple[str, pd.DataFrame, ExpectationSuiteValidationResult]]):
         results_with_error = []
         for result in results:
-            if result[1].success:
+            _, _, ge_result = result
+            if ge_result.success:
                 pass
             else:
                 results_with_error.append(result)
         if len(results_with_error) == 0:
             logging.info('GreatExpectations run SUCCESSFUL, without missed expectations.')
         else:
-            logging.error(f'FAILED: {len(results_with_error)} out of {len(ge_dfs)} tested datasets have failed.')
-            raise AirflowException(results_with_error)
+            logging.warning(f'FAILED: {len(results_with_error)} out of {len(results)} tested datasets have failed.')
+        return results_with_error
 
 
-class GreatExpectationsBaseOperator(BaseOperator):
+
+class GreatExpectationsBaseOperator(BaseOperator, ExpectationMixin):
+    METHOD_NAME: str
 
     def __init__(
         self,
         ckan_metadata_url: str,
-        sftp_connection_id: str,
-        store_path: str,
+        ge_parameters: dict,
+        sftp_connection_id: str = DEFAULT_SFTP_CONN_ID,
+        mongo_connection_id: str = DEFAULT_MONGO_CONN_ID,
+        store_path: str = os.path.join('data', 'ckan'),
+        df_apply_func: Optional[List[Tuple[str, object]]] = None,
         **kwargs
     ):
         super().__init__(**kwargs)
         self.ckan_metadata_url = ckan_metadata_url
         self.sftp_connection_id = sftp_connection_id
+        self.mongo_connection_id = mongo_connection_id
         self.store_path = store_path
+        self.ge_parameters = ge_parameters
+        self.df_apply_func = df_apply_func
+        self.df_apply_func_str = self._generate_df_apply_func_string()
 
         # Extract metadata from ckan
         r = requests.get(self.ckan_metadata_url)
@@ -102,221 +130,66 @@ class GreatExpectationsBaseOperator(BaseOperator):
         # Set general attributes
         self.remote_filepath = os.path.join(self.store_path, self.ckan_id)
 
+    def _generate_df_apply_func_string(self):
+        if self.df_apply_func is None:
+            return
+        else:
+            res = []
+            for _, i in self.df_apply_func:
+                res.append(inspect.getsource(i).strip())  # Not very pretty...
+            return res
 
-class ExpectTableColumnsToMatchOrderedListOperator(GreatExpectationsBaseOperator, ExpectationMixin):
-    """Apply Expectation"""
+    def store_results_mongodb(self, context: Context, results: List[Tuple[str, pd.DataFrame, ExpectationSuiteValidationResult]]):
+        insert_dicts = []
+        for csv, _, ge_result in results:
+            insert_dicts.append({
+                'ckan_name': self.ckan_name,
+                'ckan_id': self.ckan_id,
+                'ckan_file': csv,
+                'airflow_dag': context.get('dag').dag_id,
+                'airflow_run': context.get('run_id'),
+                'airflow_execdate': context.get('dag_run').execution_date,
+                'airflow_task': context.get('task').task_id,
+                'ge_expectation': self.METHOD_NAME,
+                'ge_success': ge_result.success,
+                'ge_params': self.ge_parameters,
+                'ge_filter': self.df_apply_func_str,
+                'ge_result': ge_result.to_raw_dict(),
+            })
 
+        with MongoHook(self.mongo_connection_id) as client:
+            client.insert_many(RESULT_INSERT_COLLECTION, insert_dicts)
+
+    def execute(self, context):
+        results = self.apply_expectations(self.METHOD_NAME, **self.ge_parameters)
+        self.store_results_mongodb(context, results)
+        if len([_ for _, _, i in results if i.success == False]) > 0:
+            logging.warning('Exectation marked as FAILED')
+
+
+class ExpectTableColumnsToMatchOrderedListOperator(GreatExpectationsBaseOperator):
     METHOD_NAME = 'expect_table_columns_to_match_ordered_list'
 
-    def __init__(
-        self,
-        ge_col_list: List[str],
-        ckan_metadata_url: str,
-        sftp_connection_id: str = _DEFAULT_SFTP_CONN_ID,
-        store_path: str = os.path.join('data', 'ckan'),
-        df_apply_func: Optional[List[Tuple[str, object]]] = None,
-        **kwargs
-    ):
-        super().__init__(
-            ckan_metadata_url=ckan_metadata_url,
-            sftp_connection_id=sftp_connection_id,
-            store_path=store_path,
-            **kwargs
-        )
-        self.ge_parameters = {
-            'column_list': ge_col_list,
-        }
-        self.df_apply_func = df_apply_func
 
-    def execute(self, context):
-        self.apply_expectations(self.METHOD_NAME, **self.ge_parameters)
-
-
-class ExpectColumnDistinctValuesToBeInSet(GreatExpectationsBaseOperator, ExpectationMixin):
-    """Apply Expectation"""
-
+class ExpectColumnDistinctValuesToBeInSet(GreatExpectationsBaseOperator):
     METHOD_NAME = 'expect_column_distinct_values_to_be_in_set'
 
-    def __init__(
-        self,
-        ge_col: str,
-        ge_values: list,
-        ckan_metadata_url: str,
-        sftp_connection_id: str = _DEFAULT_SFTP_CONN_ID,
-        store_path: str = os.path.join('data', 'ckan'),
-        df_apply_func: Optional[List[Tuple[str, object]]] = None,
-        **kwargs
-    ):
-        super().__init__(
-            ckan_metadata_url=ckan_metadata_url,
-            sftp_connection_id=sftp_connection_id,
-            store_path=store_path,
-            **kwargs
-        )
-        self.ge_parameters = {
-            'column': ge_col,
-            'value_set': ge_values,
-        }
-        self.df_apply_func = df_apply_func
 
-    def execute(self, context):
-        self.apply_expectations(self.METHOD_NAME, **self.ge_parameters)
-
-
-class ExpectColumnValuesToBeDateutilParseable(GreatExpectationsBaseOperator, ExpectationMixin):
-    """Apply Expectation"""
-
+class ExpectColumnValuesToBeDateutilParseable(GreatExpectationsBaseOperator):
     METHOD_NAME = 'expect_column_values_to_be_dateutil_parseable'
 
-    def __init__(
-        self,
-        ge_col: str,
-        ckan_metadata_url: str,
-        sftp_connection_id: str = _DEFAULT_SFTP_CONN_ID,
-        store_path: str = os.path.join('data', 'ckan'),
-        df_apply_func: Optional[List[Tuple[str, object]]] = None,
-        **kwargs
-    ):
-        super().__init__(
-            ckan_metadata_url=ckan_metadata_url,
-            sftp_connection_id=sftp_connection_id,
-            store_path=store_path,
-            **kwargs
-        )
-        self.ge_parameters = {
-            'column': ge_col,
-        }
-        self.df_apply_func = df_apply_func
 
-    def execute(self, context):
-        self.apply_expectations(self.METHOD_NAME, **self.ge_parameters)
-
-
-class ExpectColumnValuesToBeBetween(GreatExpectationsBaseOperator, ExpectationMixin):
-    """Apply Expectation"""
-
+class ExpectColumnValuesToBeBetween(GreatExpectationsBaseOperator):
     METHOD_NAME = 'expect_column_values_to_be_between'
 
-    def __init__(
-        self,
-        ckan_metadata_url: str,
-        ge_col: str,
-        ge_min: Optional[float] = None,
-        ge_max: Optional[float] = None,
-        sftp_connection_id: str = _DEFAULT_SFTP_CONN_ID,
-        store_path: str = os.path.join('data', 'ckan'),
-        df_apply_func: Optional[List[Tuple[str, object]]] = None,
-        **kwargs
-    ):
-        super().__init__(
-            ckan_metadata_url=ckan_metadata_url,
-            sftp_connection_id=sftp_connection_id,
-            store_path=store_path,
-            **kwargs
-        )
-        self.ge_parameters = {
-            'column': ge_col,
-            'min_value': ge_min,
-            'max_value': ge_max
-        }
-        self.df_apply_func = df_apply_func
 
-    def execute(self, context):
-        self.apply_expectations(self.METHOD_NAME, **self.ge_parameters)
-
-
-class ExpectColumnMedianToBeBetween(GreatExpectationsBaseOperator, ExpectationMixin):
-    """Apply Expectation"""
-
+class ExpectColumnMedianToBeBetween(GreatExpectationsBaseOperator):
     METHOD_NAME = 'expect_column_median_to_be_between'
 
-    def __init__(
-        self,
-        ckan_metadata_url: str,
-        ge_col: str,
-        ge_min: Optional[float] = None,
-        ge_max: Optional[float] = None,
-        sftp_connection_id: str = _DEFAULT_SFTP_CONN_ID,
-        store_path: str = os.path.join('data', 'ckan'),
-        df_apply_func: Optional[List[Tuple[str, object]]] = None,
-        **kwargs
-    ):
-        super().__init__(
-            ckan_metadata_url=ckan_metadata_url,
-            sftp_connection_id=sftp_connection_id,
-            store_path=store_path,
-            **kwargs
-        )
-        self.ge_parameters = {
-            'column': ge_col,
-            'min_value': ge_min,
-            'max_value': ge_max
-        }
-        self.df_apply_func = df_apply_func
 
-    def execute(self, context):
-        self.apply_expectations(self.METHOD_NAME, **self.ge_parameters)
-
-
-class ExpectColumnMeanToBeBetween(GreatExpectationsBaseOperator, ExpectationMixin):
-    """Apply Expectation"""
-
+class ExpectColumnMeanToBeBetween(GreatExpectationsBaseOperator):
     METHOD_NAME = 'expect_column_median_to_be_between'
 
-    def __init__(
-        self,
-        ckan_metadata_url: str,
-        ge_col: str,
-        ge_min: Optional[float] = None,
-        ge_max: Optional[float] = None,
-        sftp_connection_id: str = _DEFAULT_SFTP_CONN_ID,
-        store_path: str = os.path.join('data', 'ckan'),
-        df_apply_func: Optional[List[Tuple[str, object]]] = None,
-        **kwargs
-    ):
-        super().__init__(
-            ckan_metadata_url=ckan_metadata_url,
-            sftp_connection_id=sftp_connection_id,
-            store_path=store_path,
-            **kwargs
-        )
-        self.ge_parameters = {
-            'column': ge_col,
-            'min_value': ge_min,
-            'max_value': ge_max
-        }
-        self.df_apply_func = df_apply_func
 
-    def execute(self, context):
-        self.apply_expectations(self.METHOD_NAME, **self.ge_parameters)
-
-
-class ExpectColumnValuesToMatchRegexList(GreatExpectationsBaseOperator, ExpectationMixin):
-    """Apply Expectation"""
-
+class ExpectColumnValuesToMatchRegexList(GreatExpectationsBaseOperator):
     METHOD_NAME = 'expect_column_values_to_match_regex_list'
-
-    def __init__(
-        self,
-        ge_col: str,
-        ge_regex_list: List[str],
-        ckan_metadata_url: str,
-        sftp_connection_id: str = _DEFAULT_SFTP_CONN_ID,
-        store_path: str = os.path.join('data', 'ckan'),
-        df_apply_func: Optional[List[Tuple[str, object]]] = None,
-        **kwargs
-    ):
-        super().__init__(
-            ckan_metadata_url=ckan_metadata_url,
-            sftp_connection_id=sftp_connection_id,
-            store_path=store_path,
-            **kwargs
-        )
-        self.ge_parameters = {
-            'column': ge_col,
-            'regex_list': ge_regex_list,
-        }
-        self.df_apply_func = df_apply_func
-
-    def execute(self, context):
-        self.apply_expectations(self.METHOD_NAME, **self.ge_parameters)
