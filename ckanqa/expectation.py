@@ -80,6 +80,11 @@ class ExpectationMixin(ABC):
         results = []
         for df in ge_dfs:
             res = getattr(df[1], method_name)(**kwargs)
+            if res['success']:
+                logging.info('=====> SUCCESS: GreatExpectations test was successful.')
+            else:
+                logging.warning('=====> WARNING: GreatExpectations test was not successful.')
+                logging.warning(res)
             results.append((df[0], df[1], res))
         return results
 
@@ -163,8 +168,6 @@ class GreatExpectationsBaseOperator(BaseOperator, ExpectationMixin):
     def execute(self, context):
         results = self.apply_expectations(self.METHOD_NAME, **self.ge_parameters)
         self.store_results_mongodb(context, results)
-        if len([_ for _, _, i in results if i.success == False]) > 0:
-            logging.warning('Exectation marked as FAILED')
 
 
 class ExpectTableColumnsToMatchOrderedListOperator(GreatExpectationsBaseOperator):
