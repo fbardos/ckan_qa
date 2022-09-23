@@ -14,7 +14,6 @@ import requests
 from great_expectations.core.expectation_validation_result import \
     ExpectationSuiteValidationResult
 
-from airflow.models.baseoperator import BaseOperator
 from airflow.providers.mongo.hooks.mongo import MongoHook
 from airflow.providers.sftp.hooks.sftp import SFTPHook
 from airflow.utils.context import Context
@@ -23,6 +22,7 @@ from airflow.utils.context import Context
 sys.path.append(os.path.dirname(os.path.abspath(os.path.join(__file__, '../ckanqa'))))
 from ckanqa.constant import (DEFAULT_MONGO_CONN_ID, DEFAULT_SFTP_CONN_ID,
                              RESULT_INSERT_COLLECTION)
+from ckanqa.ckan import CkanBaseOperator
 
 
 class ExpectationMixin(ABC):
@@ -45,7 +45,7 @@ class ExpectationMixin(ABC):
                 df['__filter']= df[filter[0]].apply(filter[1])
                 df = df[df['__filter']]
                 df.drop('__filter', axis=1, inplace=True)
-        logging.debug(f'EXTRACT from df: {df}')
+        logging.debug(f'EXTRACT from df: \n{df}')
         return df
 
     def load_csv_as_dataframe_from_nas(self) -> list:
@@ -105,7 +105,7 @@ class ExpectationMixin(ABC):
 
 
 
-class GreatExpectationsBaseOperator(BaseOperator, ExpectationMixin):
+class GreatExpectationsBaseOperator(CkanBaseOperator, ExpectationMixin):
     METHOD_NAME: str
 
     def __init__(
@@ -118,23 +118,12 @@ class GreatExpectationsBaseOperator(BaseOperator, ExpectationMixin):
         df_apply_func: Optional[List[Tuple[str, object]]] = None,
         **kwargs
     ):
-        super().__init__(**kwargs)
-        self.ckan_metadata_url = ckan_metadata_url
+        super().__init__(ckan_metadata_url=ckan_metadata_url, store_path=store_path, **kwargs)
         self.sftp_connection_id = sftp_connection_id
         self.mongo_connection_id = mongo_connection_id
-        self.store_path = store_path
         self.ge_parameters = ge_parameters
         self.df_apply_func = df_apply_func
         self.df_apply_func_str = self._generate_df_apply_func_string()
-
-        # Extract metadata from ckan
-        r = requests.get(self.ckan_metadata_url)
-        self._meta = json.loads(r.text)
-        self.ckan_name = self._meta['result']['name']
-        self.ckan_id = self._meta['result']['id']
-
-        # Set general attributes
-        self.remote_filepath = os.path.join(self.store_path, self.ckan_id)
 
     def _generate_df_apply_func_string(self):
         if self.df_apply_func is None:
@@ -167,6 +156,8 @@ class GreatExpectationsBaseOperator(BaseOperator, ExpectationMixin):
             client.insert_many(RESULT_INSERT_COLLECTION, insert_dicts)
 
     def execute(self, context):
+        if self._meta is None:
+            self._set_metadata()
         results = self.apply_expectations(self.METHOD_NAME, **self.ge_parameters)
         self.store_results_mongodb(context, results)
 

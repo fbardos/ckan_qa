@@ -26,6 +26,7 @@ sys.path.append(os.path.dirname(os.path.abspath(os.path.join(__file__, '../ckanq
 from ckanqa.constant import DEFAULT_MONGO_CONN_ID, RESULT_INSERT_COLLECTION, DEFAULT_SFTP_CONN_ID, DEFAULT_MATRIX_CONN_ID, MATRIX_ROOM_ID_ALL, MATRIX_ROOM_ID_FAILURE
 
 
+# TODO: When CSVs are year-named (one csv per Year) --> use DAG execution_date to pick the right csv (to also compare old csvs)
 class ResultsExtractor:
     """Loads data from GreatExectation results.
 
@@ -154,7 +155,34 @@ class ResultsExtractor:
         return '\n'.join(lines)
 
 
-class CkanCsvStoreOperator(BaseOperator):
+class CkanBaseOperator(BaseOperator):
+
+    def __init__(self, ckan_metadata_url: str, store_path: Optional[str] = None, **kwargs):
+        super().__init__(**kwargs)
+        self.ckan_metadata_url = ckan_metadata_url
+        self.store_path = store_path
+
+        # Will only be loaded when executing, not DagBag loading.
+        self._meta = None
+        self.ckan_name = None
+        self.ckan_id = None
+
+    @property
+    def remote_filepath(self):
+        if self.ckan_id is None:
+            self._set_metadata()
+        if self.store_path is None:
+            raise AttributeError('Attribute store_path is not set.')
+        return os.path.join(self.store_path, self.ckan_id)
+
+    def _set_metadata(self):
+        r = requests.get(self.ckan_metadata_url)
+        self._meta = json.loads(r.text)
+        self.ckan_name = self._meta['result']['name']
+        self.ckan_id = self._meta['result']['id']
+
+
+class CkanCsvStoreOperator(CkanBaseOperator):
     """Stores CSVs on remote location via SFTP.
 
     This operator will create a directory (named after CKAN ID) and store
@@ -178,22 +206,20 @@ class CkanCsvStoreOperator(BaseOperator):
         store_path: str = os.path.join('data', 'ckan'),
         **kwargs
     ):
-        super().__init__(**kwargs)
-        self.ckan_metadata_url = ckan_metadata_url
+        super().__init__(ckan_metadata_url=ckan_metadata_url, store_path=store_path, **kwargs)
         self.extract_csv_urls = extract_csv_urls
         self.sftp_connection_id = sftp_connection_id
-        self.store_path = store_path
 
-        # Extract metadata from ckan
-        r = requests.get(self.ckan_metadata_url)
-        self._meta = json.loads(r.text)
-        self.ckan_name = self._meta['result']['name']
-        self.ckan_id = self._meta['result']['id']
-
-        # Set general attributes
-        self.remote_filepath = os.path.join(self.store_path, self.ckan_id)
+    @property
+    def remote_filepath(self):
+        if self._meta is None:
+            self._set_metadata()
+        return os.path.join(self.store_path, self.ckan_id)
 
     def execute(self, context):
+        if self._meta is None:
+            self._set_metadata()
+
         if self.extract_csv_urls is None:
             csv_urls = [i['download_url'] for i in self._meta['result']['resources'] if i['media_type'] == 'text/csv']
         else:
@@ -216,7 +242,7 @@ class CkanCsvStoreOperator(BaseOperator):
             sftp_client.close_conn()
 
 
-class CkanCsvDeleteOperator(BaseOperator):
+class CkanCsvDeleteOperator(CkanBaseOperator):
     """Deletes stored files on remote location via SFTP.
 
     This operator will delete all files on remote location's path,
@@ -237,18 +263,19 @@ class CkanCsvDeleteOperator(BaseOperator):
         store_path: str = os.path.join('data', 'ckan'),
         **kwargs
     ):
-        super().__init__(**kwargs)
+        super().__init__(ckan_metadata_url=ckan_metadata_url, store_path=store_path, **kwargs)
         self.ckan_metadata_url = ckan_metadata_url
         self.sftp_connection_id = sftp_connection_id
-        self.store_path = store_path
 
-        # Extract metadata from ckan
-        r = requests.get(self.ckan_metadata_url)
-        self._meta = json.loads(r.text)
-        self.ckan_id = self._meta['result']['id']
-        self.remote_filepath = os.path.join(self.store_path, self.ckan_id)
+    @property
+    def remote_filepath(self):
+        if self._meta is None:
+            self._set_metadata()
+        return os.path.join(self.store_path, self.ckan_id)
 
     def execute(self, context):
+        if self._meta is None:
+            self._set_metadata()
 
         # Delete filese in directory on NAS
         sftp_client = SFTPHook(self.sftp_connection_id)
