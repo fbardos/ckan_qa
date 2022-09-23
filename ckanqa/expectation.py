@@ -45,6 +45,7 @@ class ExpectationMixin(ABC):
                 df['__filter']= df[filter[0]].apply(filter[1])
                 df = df[df['__filter']]
                 df.drop('__filter', axis=1, inplace=True)
+        logging.debug(f'EXTRACT from df: {df}')
         return df
 
     def load_csv_as_dataframe_from_nas(self) -> list:
