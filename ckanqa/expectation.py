@@ -180,6 +180,10 @@ class ExpectColumnMedianToBeBetween(GreatExpectationsBaseOperator):
     METHOD_NAME = 'expect_column_median_to_be_between'
 
 
+class ExpectColumnStdevToBeBetween(GreatExpectationsBaseOperator):
+    METHOD_NAME = 'expect_column_stdev_to_be_between'
+
+
 class ExpectColumnMeanToBeBetween(GreatExpectationsBaseOperator):
     METHOD_NAME = 'expect_column_median_to_be_between'
 
