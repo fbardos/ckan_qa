@@ -7,6 +7,7 @@ import sys
 from abc import ABC
 from multiprocessing import Value
 from typing import List, Optional, Tuple
+from airflow.exceptions import AirflowException
 
 import great_expectations as ge
 import pandas as pd
@@ -103,14 +104,14 @@ class GreatExpectationsBaseOperator(CkanBaseOperator):
         """
         ge_dfs = self.load_csv_as_dataframe_from_nas()
         results = []
-        for df in ge_dfs:
-            res = getattr(df[1], method_name)(**kwargs)
+        for name, df in ge_dfs:
+            res = getattr(df, method_name)(**kwargs)
             if res['success']:
                 logging.info('=====> SUCCESS: GreatExpectations test was successful.')
             else:
                 logging.warning('=====> WARNING: GreatExpectations test was not successful.')
                 logging.warning(res)
-            results.append((df[0], df[1], res))
+            results.append((name, df, res))
         return results
 
     def log_results(self, results: List[Tuple[str, pd.DataFrame, ExpectationSuiteValidationResult]]):
@@ -161,6 +162,10 @@ class ExpectTableColumnsToMatchOrderedListOperator(GreatExpectationsBaseOperator
 
 class ExpectColumnDistinctValuesToBeInSet(GreatExpectationsBaseOperator):
     METHOD_NAME = 'expect_column_distinct_values_to_be_in_set'
+
+
+class ExpectColumnDistinctValuesToContainSet(GreatExpectationsBaseOperator):
+    METHOD_NAME = 'expect_column_distinct_values_to_contain_set'
 
 
 class ExpectColumnValuesToBeDateutilParseable(GreatExpectationsBaseOperator):
