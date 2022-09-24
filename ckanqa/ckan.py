@@ -179,7 +179,7 @@ class CkanBaseOperator(BaseOperator):
     def _set_metadata(self):
         hook = RedisHook(DEFAULT_REDIS_CONN_ID)
         with hook.get_conn() as conn:
-            key = 'ckan:meta:customid'
+            key = f'ckan:meta:{self.ckan_metadata_url}'
             if conn.exists(key):
                 logging.debug('Found cached response in redis, load from there.')
                 r = conn.get(key)
