@@ -1,0 +1,17 @@
+# Set logging system wide
+x-logging: &default-logging
+  options:
+    max-size: '100m'
+    max-file: '3'
+
+services:
+  algo_redis:
+    container_name: ckan_redis
+    image: redis
+    logging: *default-logging
+    environment:
+      - ALLOW_EMPTY_PASSWORD=yes
+    ports:
+      - 41414:6379
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']

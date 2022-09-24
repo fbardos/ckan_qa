@@ -5,6 +5,7 @@ import json
 import os
 import re
 import pprint
+import logging
 import asyncio
 from typing import List, Optional
 from airflow.exceptions import AirflowException
@@ -13,6 +14,7 @@ from airflow.models.connection import Connection
 import requests
 
 from airflow.providers.mongo.hooks.mongo import MongoHook
+from airflow.providers.redis.hooks.redis import RedisHook
 from airflow.utils.email import send_email_smtp
 from airflow.models.baseoperator import BaseOperator
 from airflow.providers.sftp.hooks.sftp import SFTPHook
@@ -23,10 +25,9 @@ from sqlalchemy.sql.sqltypes import Boolean
 from ckanqa.matrix_hook import MatrixHook
 
 sys.path.append(os.path.dirname(os.path.abspath(os.path.join(__file__, '../ckanqa'))))
-from ckanqa.constant import DEFAULT_MONGO_CONN_ID, RESULT_INSERT_COLLECTION, DEFAULT_SFTP_CONN_ID, DEFAULT_MATRIX_CONN_ID, MATRIX_ROOM_ID_ALL, MATRIX_ROOM_ID_FAILURE
+from ckanqa.constant import DEFAULT_MONGO_CONN_ID, RESULT_INSERT_COLLECTION, DEFAULT_SFTP_CONN_ID, DEFAULT_MATRIX_CONN_ID, MATRIX_ROOM_ID_ALL, MATRIX_ROOM_ID_FAILURE, DEFAULT_REDIS_CONN_ID, REDIS_DEFAULT_TTL
 
 
-# TODO: When CSVs are year-named (one csv per Year) --> use DAG execution_date to pick the right csv (to also compare old csvs)
 class ResultsExtractor:
     """Loads data from GreatExectation results.
 
@@ -176,8 +177,23 @@ class CkanBaseOperator(BaseOperator):
         return os.path.join(self.store_path, self.ckan_id)
 
     def _set_metadata(self):
-        r = requests.get(self.ckan_metadata_url)
-        self._meta = json.loads(r.text)
+        hook = RedisHook(DEFAULT_REDIS_CONN_ID)
+        with hook.get_conn() as conn:
+            key = 'ckan:meta:customid'
+            if conn.exists(key):
+                logging.debug('Found cached response in redis, load from there.')
+                r = conn.get(key)
+                if r is None:
+                    raise ValueError('Redis key not found.')
+                r_json = r.decode('utf-8')
+                logging.debug(f'Extracted str from redis (extract): {r_json[:100]}')
+            else:
+                logging.debug('Not found cached response in redis, load from CKAN API.')
+                r = requests.get(self.ckan_metadata_url)
+                r_json = r.text
+                conn.set(key, r_json, ex=REDIS_DEFAULT_TTL)
+        logging.debug(f'Extracted meta (extract): {r_json[:80]}')
+        self._meta = json.loads(r_json)
         self.ckan_name = self._meta['result']['name']
         self.ckan_id = self._meta['result']['id']
 
