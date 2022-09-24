@@ -25,10 +25,34 @@ from ckanqa.constant import (DEFAULT_MONGO_CONN_ID, DEFAULT_SFTP_CONN_ID,
 from ckanqa.ckan import CkanBaseOperator
 
 
-class ExpectationMixin(ABC):
-    sftp_connection_id: str
-    remote_filepath: str
-    df_apply_func: Optional[List[Tuple[str, object]]]
+class GreatExpectationsBaseOperator(CkanBaseOperator):
+    METHOD_NAME: str
+
+    def __init__(
+        self,
+        ckan_metadata_url: str,
+        ge_parameters: dict,
+        sftp_connection_id: str = DEFAULT_SFTP_CONN_ID,
+        mongo_connection_id: str = DEFAULT_MONGO_CONN_ID,
+        store_path: str = os.path.join('data', 'ckan'),
+        df_apply_func: Optional[List[Tuple[str, object]]] = None,
+        **kwargs
+    ):
+        super().__init__(ckan_metadata_url=ckan_metadata_url, store_path=store_path, **kwargs)
+        self.sftp_connection_id = sftp_connection_id
+        self.mongo_connection_id = mongo_connection_id
+        self.ge_parameters = ge_parameters
+        self.df_apply_func = df_apply_func
+        self.df_apply_func_str = self._generate_df_apply_func_string()
+
+    def _generate_df_apply_func_string(self):
+        if self.df_apply_func is None:
+            return
+        else:
+            res = []
+            for _, i in self.df_apply_func:
+                res.append(inspect.getsource(i).strip())  # Not very pretty...
+            return res
 
     def filter_df(self, df: pd.DataFrame):
         """Apply filter to DataFrame if set in df_apply_func.
@@ -102,37 +126,6 @@ class ExpectationMixin(ABC):
         else:
             logging.warning(f'FAILED: {len(results_with_error)} out of {len(results)} tested datasets have failed.')
         return results_with_error
-
-
-
-class GreatExpectationsBaseOperator(CkanBaseOperator, ExpectationMixin):
-    METHOD_NAME: str
-
-    def __init__(
-        self,
-        ckan_metadata_url: str,
-        ge_parameters: dict,
-        sftp_connection_id: str = DEFAULT_SFTP_CONN_ID,
-        mongo_connection_id: str = DEFAULT_MONGO_CONN_ID,
-        store_path: str = os.path.join('data', 'ckan'),
-        df_apply_func: Optional[List[Tuple[str, object]]] = None,
-        **kwargs
-    ):
-        super().__init__(ckan_metadata_url=ckan_metadata_url, store_path=store_path, **kwargs)
-        self.sftp_connection_id = sftp_connection_id
-        self.mongo_connection_id = mongo_connection_id
-        self.ge_parameters = ge_parameters
-        self.df_apply_func = df_apply_func
-        self.df_apply_func_str = self._generate_df_apply_func_string()
-
-    def _generate_df_apply_func_string(self):
-        if self.df_apply_func is None:
-            return
-        else:
-            res = []
-            for _, i in self.df_apply_func:
-                res.append(inspect.getsource(i).strip())  # Not very pretty...
-            return res
 
     def store_results_mongodb(self, context: Context, results: List[Tuple[str, pd.DataFrame, ExpectationSuiteValidationResult]]):
         insert_dicts = []
