@@ -8,6 +8,7 @@ services:
   algo_redis:
     container_name: ckan_redis
     image: redis
+    restart: unless-stopped
     logging: *default-logging
     environment:
       - ALLOW_EMPTY_PASSWORD=yes
