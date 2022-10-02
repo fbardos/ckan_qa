@@ -26,6 +26,7 @@ with DAG(
     schedule_interval='0 3 * * *',
     start_date=dt.datetime(2022, 9, 1),
     catchup=False,
+    tags=['ckan', 'swiss'],
 ) as dag:
 
     load = CkanRedisStoreOperator(
