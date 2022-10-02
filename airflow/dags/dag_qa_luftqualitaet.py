@@ -8,7 +8,7 @@ from airflow.utils.trigger_rule import TriggerRule
 
 # Use relative path for custom modules (easier to handle with airflow deployment atm)
 sys.path.append(os.path.dirname(os.path.abspath(os.path.join(__file__, '../../../ckanqa'))))
-from ckanqa.ckan import (CkanCsvDeleteOperator, CkanCsvStoreOperator,
+from ckanqa.ckan import (CkanRedisStoreOperator, CkanRedisDeleteOperator,
                          CkanPropagateResultMatrix)
 from ckanqa.expectation import *
 
@@ -19,9 +19,10 @@ with DAG(
     schedule_interval='0 3 * * *',
     start_date=dt.datetime(2022, 9, 1),
     catchup=False,
+    tags=['ckan', 'swiss'],
 ) as dag:
 
-    load = CkanCsvStoreOperator(
+    load = CkanRedisStoreOperator(
         task_id='load',
         ckan_metadata_url=CKAN_META
     )
@@ -82,10 +83,7 @@ with DAG(
                 'min_value': 1,
                 'max_value': 1000,
             },
-            df_apply_func=[
-                ('Parameter', lambda x: True if x == 'NOx' else False),
-                ('Wert', lambda x: True if x else False),  # Exclude NULL values
-            ],
+            df_query_str='Parameter == "NOx"',
         ),
         ExpectColumnValuesToBeBetween(
             task_id='check8',
@@ -95,9 +93,7 @@ with DAG(
                 'min_value': 0,
                 'max_value': 200,
             },
-            df_apply_func=[
-                ('Parameter', lambda x: True if x == 'O3' else False),
-            ],
+            df_query_str='Parameter == "O3"',
         ),
         ExpectColumnMedianToBeBetween(
             task_id='check9',
@@ -107,9 +103,7 @@ with DAG(
                 'min_value': 0.15,
                 'max_value': 2.9,
             },
-            df_apply_func=[
-                ('Parameter', lambda x: True if x == 'CO' else False),
-            ],
+            df_query_str='Parameter == "CO"',
         ),
         ExpectColumnValuesToBeBetween(
             task_id='check10',
@@ -119,9 +113,7 @@ with DAG(
                 'min_value': 0,
                 'max_value': 470,
             },
-            df_apply_func=[
-                ('Parameter', lambda x: True if x == 'SO2' else False),
-            ],
+            df_query_str='Parameter == "SO2"',
         ),
         ExpectColumnValuesToBeBetween(
             task_id='check11',
@@ -131,9 +123,7 @@ with DAG(
                 'min_value': 1.1,
                 'max_value': 280,
             },
-            df_apply_func=[
-                ('Parameter', lambda x: True if x == 'NO2' else False),
-            ],
+            df_query_str='Parameter == "NO2"',
         ),
         ExpectColumnValuesToBeBetween(
             task_id='check12',
@@ -143,9 +133,7 @@ with DAG(
                 'min_value': 0.02,
                 'max_value': 750,
             },
-            df_apply_func=[
-                ('Parameter', lambda x: True if x == 'NO' else False),
-            ],
+            df_query_str='Parameter == "NO"',
         ),
         ExpectColumnValuesToBeBetween(
             task_id='check13',
@@ -155,9 +143,7 @@ with DAG(
                 'min_value': 0,
                 'max_value': 300,
             },
-            df_apply_func=[
-                ('Parameter', lambda x: True if x == 'O3_max_h1' else False),
-            ],
+            df_query_str='Parameter == "O3_max_h1"',
         ),
         ExpectColumnValuesToBeBetween(
             task_id='check14',
@@ -167,9 +153,7 @@ with DAG(
                 'min_value': 0,
                 'max_value': 22,
             },
-            df_apply_func=[
-                ('Parameter', lambda x: True if x == 'O3_nb_h1>120' else False),
-            ],
+            df_query_str='Parameter == "O3_nb_h1>120"',
         ),
         ExpectColumnValuesToBeBetween(
             task_id='check15',
@@ -179,9 +163,7 @@ with DAG(
                 'min_value': 0.9,
                 'max_value': 170,
             },
-            df_apply_func=[
-                ('Parameter', lambda x: True if x == 'PM10' else False),
-            ],
+            df_query_str='Parameter == "PM10"',
         ),
         ExpectColumnValuesToBeBetween(
             task_id='check16',
@@ -191,9 +173,7 @@ with DAG(
                 'min_value': 1.9,
                 'max_value': 70,
             },
-            df_apply_func=[
-                ('Parameter', lambda x: True if x == 'PM2.5' else False),
-            ],
+            df_query_str='Parameter == "PM2.5"',
         ),
         ExpectColumnValuesToBeBetween(
             task_id='check17',
@@ -203,9 +183,7 @@ with DAG(
                 'min_value': 0,
                 'max_value': 80_000,
             },
-            df_apply_func=[
-                ('Parameter', lambda x: True if x == 'PN' else False),
-            ],
+            df_query_str='Parameter == "PN"',
         ),
         ExpectColumnValuesToBeBetween(
             task_id='check18',
@@ -219,7 +197,7 @@ with DAG(
 
     postprocessing = EmptyOperator(task_id='postprocessing')
 
-    clean = CkanCsvDeleteOperator(
+    clean = CkanRedisDeleteOperator(
         task_id='clean',
         trigger_rule=TriggerRule.ALL_DONE,
         ckan_metadata_url=CKAN_META,

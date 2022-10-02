@@ -6,7 +6,7 @@ import os
 import sys
 from abc import ABC
 from multiprocessing import Value
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple, Literal
 from airflow.exceptions import AirflowException
 
 import great_expectations as ge
@@ -17,11 +17,13 @@ from great_expectations.core.expectation_validation_result import \
 
 from airflow.providers.mongo.hooks.mongo import MongoHook
 from airflow.providers.sftp.hooks.sftp import SFTPHook
+from airflow.providers.redis.hooks.redis import RedisHook
 from airflow.utils.context import Context
+from ckanqa.connectors import RedisConnector, SftpConnector
 
 # Use relative path for custom modules (easier to handle with airflow deployment atm)
 sys.path.append(os.path.dirname(os.path.abspath(os.path.join(__file__, '../ckanqa'))))
-from ckanqa.constant import (DEFAULT_MONGO_CONN_ID, DEFAULT_SFTP_CONN_ID,
+from ckanqa.constant import (DEFAULT_MONGO_CONN_ID, DEFAULT_REDIS_CONN_ID, DEFAULT_SFTP_CONN_ID,
                              RESULT_INSERT_COLLECTION)
 from ckanqa.ckan import CkanBaseOperator
 
@@ -33,18 +35,26 @@ class GreatExpectationsBaseOperator(CkanBaseOperator):
         self,
         ckan_metadata_url: str,
         ge_parameters: dict,
-        sftp_connection_id: str = DEFAULT_SFTP_CONN_ID,
+        connector: Literal['sftp', 'redis'] = 'redis',
+        source_connection_id: Optional[str] = None,
         mongo_connection_id: str = DEFAULT_MONGO_CONN_ID,
-        store_path: str = os.path.join('data', 'ckan'),
         df_apply_func: Optional[List[Tuple[str, object]]] = None,
+        df_query_str: Optional[str] = None,
         **kwargs
     ):
-        super().__init__(ckan_metadata_url=ckan_metadata_url, store_path=store_path, **kwargs)
-        self.sftp_connection_id = sftp_connection_id
+        super().__init__(ckan_metadata_url=ckan_metadata_url, **kwargs)
+        self.source_connection_id = source_connection_id
         self.mongo_connection_id = mongo_connection_id
         self.ge_parameters = ge_parameters
         self.df_apply_func = df_apply_func
         self.df_apply_func_str = self._generate_df_apply_func_string()
+        self.df_query_str = df_query_str
+
+        connector_kwargs = dict(connection_id=self.source_connection_id)
+        if connector == 'sftp':
+            self.connector = SftpConnector(**{k:v for k, v in connector_kwargs.items() if v is not None})
+        elif connector == 'redis':
+            self.connector = RedisConnector(**{k:v for k, v in connector_kwargs.items() if v is not None})
 
     def _generate_df_apply_func_string(self):
         if self.df_apply_func is None:
@@ -52,7 +62,7 @@ class GreatExpectationsBaseOperator(CkanBaseOperator):
         else:
             res = []
             for _, i in self.df_apply_func:
-                res.append(inspect.getsource(i).strip())  # Not very pretty...
+                res.append(inspect.getsource(i).strip())  # Ugly
             return res
 
     def filter_df(self, df: pd.DataFrame):
@@ -66,32 +76,25 @@ class GreatExpectationsBaseOperator(CkanBaseOperator):
         """
         df = df.copy()
         if self.df_apply_func:
-            for filter in self.df_apply_func:
-                df['__filter']= df[filter[0]].apply(filter[1])
+            for col, filter in self.df_apply_func:
+                df['__filter'] = df[col].apply(filter)
                 df = df[df['__filter']]
                 df.drop('__filter', axis=1, inplace=True)
+        if self.df_query_str:
+            df = df.query(self.df_query_str)
         logging.debug(f'EXTRACT from df: \n{df}')
         return df
 
-    def load_csv_as_dataframe_from_nas(self) -> list:
-        """Loads files from a directory on NAS via SFTP."""
-        sftp_client = SFTPHook(self.sftp_connection_id)
-        conn = sftp_client.get_conn()
-        try:
-            conn.chdir(self.remote_filepath)
-            ge_objs = []
-            for csv in conn.listdir():
-                logging.info(f'Loading {csv}...')
-                with io.BytesIO() as fl:
-
-                    # Retrieve CSV with SFTP
-                    conn.getfo(csv, fl)
-                    fl.seek(0)
-                    df = pd.read_csv(fl)
-                    df = self.filter_df(df)
-                ge_objs.append((csv, ge.from_pandas(df)))
-        finally:
-            sftp_client.close_conn()
+    def load_csv_as_dataframe(self) -> List[tuple]:
+        """Loads files from redis or a directory on NAS via SFTP."""
+        container_list = self.connector.load_from_source(self.ckan_id)
+        ge_objs = []
+        for container in container_list:
+            df = self.filter_df(container.dataframe)
+            ge_df = ge.from_pandas(df)
+            ge_objs.append((container.csv, ge_df))
+        if len(ge_objs) == 0:
+            raise AttributeError('Returning list "ge_objs" is of length = 0.')
         return ge_objs
 
     def apply_expectations(self, method_name: str, **kwargs) -> List[Tuple[str, pd.DataFrame, ExpectationSuiteValidationResult]]:
@@ -102,7 +105,7 @@ class GreatExpectationsBaseOperator(CkanBaseOperator):
             with the results of the test.
 
         """
-        ge_dfs = self.load_csv_as_dataframe_from_nas()
+        ge_dfs = self.load_csv_as_dataframe()
         results = []
         for name, df in ge_dfs:
             res = getattr(df, method_name)(**kwargs)
@@ -143,6 +146,7 @@ class GreatExpectationsBaseOperator(CkanBaseOperator):
                 'ge_success': ge_result.success,
                 'ge_params': self.ge_parameters,
                 'ge_filter': self.df_apply_func_str,
+                'ge_query': self.df_query_str,
                 'ge_result': ge_result.to_raw_dict(),
             })
 

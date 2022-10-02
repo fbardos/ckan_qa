@@ -7,9 +7,10 @@ import re
 import pprint
 import logging
 import asyncio
-from typing import List, Optional
+from typing import List, Optional, Literal
 from airflow.exceptions import AirflowException
 from airflow.models.connection import Connection
+from redis import Redis
 
 import requests
 
@@ -26,6 +27,8 @@ from ckanqa.matrix_hook import MatrixHook
 
 sys.path.append(os.path.dirname(os.path.abspath(os.path.join(__file__, '../ckanqa'))))
 from ckanqa.constant import DEFAULT_MONGO_CONN_ID, RESULT_INSERT_COLLECTION, DEFAULT_SFTP_CONN_ID, DEFAULT_MATRIX_CONN_ID, MATRIX_ROOM_ID_ALL, MATRIX_ROOM_ID_FAILURE, DEFAULT_REDIS_CONN_ID, REDIS_DEFAULT_TTL
+from ckanqa.connectors import SftpConnector, RedisConnector
+
 
 
 class ResultsExtractor:
@@ -158,25 +161,34 @@ class ResultsExtractor:
 
 class CkanBaseOperator(BaseOperator):
 
-    def __init__(self, ckan_metadata_url: str, store_path: Optional[str] = None, **kwargs):
+    def __init__(self, ckan_metadata_url: str, **kwargs):
         super().__init__(**kwargs)
         self.ckan_metadata_url = ckan_metadata_url
-        self.store_path = store_path
 
         # Will only be loaded when executing, not DagBag loading.
         self._meta = None
-        self.ckan_name = None
-        self.ckan_id = None
+        self._ckan_name = None
+        self._ckan_id = None
 
     @property
-    def remote_filepath(self):
-        if self.ckan_id is None:
+    def meta(self):
+        if self._meta is None:
             self._set_metadata()
-        if self.store_path is None:
-            raise AttributeError('Attribute store_path is not set.')
-        return os.path.join(self.store_path, self.ckan_id)
+        return self._meta
 
-    def _set_metadata(self):
+    @property
+    def ckan_name(self):
+        if self._ckan_name is None:
+            self._set_metadata()
+        return str(self._ckan_name)
+
+    @property
+    def ckan_id(self):
+        if self._ckan_id is None:
+            self._set_metadata()
+        return str(self._ckan_id)
+
+    def _set_metadata(self) -> None:
         hook = RedisHook(DEFAULT_REDIS_CONN_ID)
         with hook.get_conn() as conn:
             key = f'ckan:meta:{self.ckan_metadata_url}'
@@ -194,11 +206,23 @@ class CkanBaseOperator(BaseOperator):
                 conn.set(key, r_json, ex=REDIS_DEFAULT_TTL)
         logging.debug(f'Extracted meta (extract): {r_json[:80]}')
         self._meta = json.loads(r_json)
-        self.ckan_name = self._meta['result']['name']
-        self.ckan_id = self._meta['result']['id']
+        self._ckan_name = self._meta['result']['name']
+        self._ckan_id = self._meta['result']['id']
 
 
-class CkanCsvStoreOperator(CkanBaseOperator):
+class CkanSftpBaseOperator(CkanBaseOperator):
+
+    def __init__(self, ckan_metadata_url: str, store_path: Optional[str] = os.path.join('data', 'ckan'), **kwargs):
+        super().__init__(ckan_metadata_url=ckan_metadata_url, **kwargs)
+        self._store_path = store_path
+        self.connector = SftpConnector(store_path)
+
+    @property
+    def remote_filepath(self):
+        return os.path.join(self.connector.store_path, self.ckan_id)
+
+
+class CkanSftpStoreOperator(CkanSftpBaseOperator):
     """Stores CSVs on remote location via SFTP.
 
     This operator will create a directory (named after CKAN ID) and store
@@ -226,39 +250,53 @@ class CkanCsvStoreOperator(CkanBaseOperator):
         self.extract_csv_urls = extract_csv_urls
         self.sftp_connection_id = sftp_connection_id
 
-    @property
-    def remote_filepath(self):
-        if self._meta is None:
-            self._set_metadata()
-        return os.path.join(self.store_path, self.ckan_id)
-
     def execute(self, context):
-        if self._meta is None:
-            self._set_metadata()
-
         if self.extract_csv_urls is None:
-            csv_urls = [i['download_url'] for i in self._meta['result']['resources'] if i['media_type'] == 'text/csv']
+            csv_urls = [i['download_url'] for i in self.meta['result']['resources'] if i['media_type'] == 'text/csv']
         else:
             csv_urls = self.extract_csv_urls
-
-        # Retrieve CSVs and store to NAS
-        sftp_client = SFTPHook(self.sftp_connection_id)
-        conn = sftp_client.get_conn()
-        try:
-            try:
-                conn.chdir(self.remote_filepath)
-            except IOError:
-                conn.mkdir(self.remote_filepath)
-                conn.chdir(self.remote_filepath)
-            for csv in csv_urls:
-                r = requests.get(csv)
-                original_filename = re.findall(r'([-a-zA-Z0-9_]+)\.csv', csv)[0]
-                conn.putfo(io.BytesIO(r.content), f'{original_filename}.csv')
-        finally:
-            sftp_client.close_conn()
+        for csv in csv_urls:
+            r = requests.get(csv)
+            filename = re.findall(r'([-a-zA-Z0-9_]+)\.csv', csv)[0]
+            self.connector.write_to_source(self.ckan_id, filename, r)
 
 
-class CkanCsvDeleteOperator(CkanBaseOperator):
+class CkanRedisStoreOperator(CkanBaseOperator):
+    """Stores CSVs on redis.
+
+    Args:
+        ckan_metadata_url: URL to CKAN package metadata.
+        extract_csv_urls: List of URLs to CSVs to extract and store.
+            If not set, the operator will download all CSVs from CKAN package.
+        redis_connection_id: Connection ID for SFTP, used by Airflow.
+        **kwargs: Kwargs for Airflow task context.
+
+    """
+
+    def __init__(
+        self,
+        ckan_metadata_url: str,
+        extract_csv_urls: Optional[List[str]] = None,
+        redis_connection_id: str = DEFAULT_REDIS_CONN_ID,
+        **kwargs
+    ):
+        super().__init__(ckan_metadata_url=ckan_metadata_url, **kwargs)
+        self.connector = RedisConnector()
+        self.extract_csv_urls = extract_csv_urls
+        self.redis_connection_id = redis_connection_id
+
+    def execute(self, context):
+        if self.extract_csv_urls is None:
+            csv_urls = [i['download_url'] for i in self.meta['result']['resources'] if i['media_type'] == 'text/csv']
+        else:
+            csv_urls = self.extract_csv_urls
+        for csv in csv_urls:
+            r = requests.get(csv)
+            filename = re.findall(r'([-a-zA-Z0-9_]+)\.csv', csv)[0]
+            self.connector.write_to_source(self.ckan_id, filename, r)
+
+
+class CkanSftpDeleteOperator(CkanSftpBaseOperator):
     """Deletes stored files on remote location via SFTP.
 
     This operator will delete all files on remote location's path,
@@ -275,37 +313,51 @@ class CkanCsvDeleteOperator(CkanBaseOperator):
     def __init__(
         self,
         ckan_metadata_url: str,
+        connector: Literal['sftp', 'redis'] = 'redis',
+        source_connection_id: Optional[str] = None,
         sftp_connection_id: str = DEFAULT_SFTP_CONN_ID,
         store_path: str = os.path.join('data', 'ckan'),
         **kwargs
     ):
         super().__init__(ckan_metadata_url=ckan_metadata_url, store_path=store_path, **kwargs)
-        self.ckan_metadata_url = ckan_metadata_url
+        self.source_connection_id = source_connection_id
         self.sftp_connection_id = sftp_connection_id
 
-    @property
-    def remote_filepath(self):
-        if self._meta is None:
-            self._set_metadata()
-        return os.path.join(self.store_path, self.ckan_id)
+        connector_kwargs = dict(connection_id=self.source_connection_id)
+        if connector == 'sftp':
+            self.connector = SftpConnector(**{k:v for k, v in connector_kwargs.items() if v is not None})
+        elif connector == 'redis':
+            self.connector = RedisConnector(**{k:v for k, v in connector_kwargs.items() if v is not None})
 
     def execute(self, context):
-        if self._meta is None:
-            self._set_metadata()
+        self.connector.delete_from_source(self.ckan_id)
 
-        # Delete filese in directory on NAS
-        sftp_client = SFTPHook(self.sftp_connection_id)
-        conn = sftp_client.get_conn()
-        try:
-            conn.chdir(self.store_path)
 
-            # Delete files, than the directory itself.
-            files = conn.listdir(self.ckan_id)
-            for file in files:
-                conn.remove(os.path.join(self.ckan_id, file))
-            conn.rmdir(self.ckan_id)
-        finally:
-            sftp_client.close_conn()
+class CkanRedisDeleteOperator(CkanBaseOperator):
+    """Deletes stored files on remote location via SFTP.
+
+    This operator will delete all files on remote location's path,
+    and the directory (named after CKAN ID) itself.
+
+    Args:
+        ckan_metadata_url: URL to CKAN package metadata.
+        sftp_connection_id: Connection ID for SFTP, used by Airflow.
+        **kwargs: Kwargs for Airflow task context.
+
+    """
+
+    def __init__(
+        self,
+        ckan_metadata_url: str,
+        redis_connection_id: str = DEFAULT_REDIS_CONN_ID,
+        **kwargs
+    ):
+        super().__init__(ckan_metadata_url=ckan_metadata_url, **kwargs)
+        self.connector = RedisConnector()
+        self.redis_connection_id = redis_connection_id
+
+    def execute(self, context):
+        self.connector.delete_from_source(self.ckan_id)
 
 
 class CkanPropagateResultMatrix(BaseOperator):

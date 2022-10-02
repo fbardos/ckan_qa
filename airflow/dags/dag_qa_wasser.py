@@ -8,7 +8,7 @@ from airflow.utils.trigger_rule import TriggerRule
 
 # Use relative path for custom modules (easier to handle with airflow deployment atm)
 sys.path.append(os.path.dirname(os.path.abspath(os.path.join(__file__, '../../../ckanqa'))))
-from ckanqa.ckan import (CkanCsvDeleteOperator, CkanCsvStoreOperator,
+from ckanqa.ckan import (CkanRedisStoreOperator, CkanRedisDeleteOperator,
                          CkanPropagateResultMatrix)
 from ckanqa.expectation import *
 
@@ -24,9 +24,10 @@ with DAG(
     schedule_interval='0 3 * * *',
     start_date=dt.datetime(2022, 9, 1),
     catchup=False,
+    tags=['ckan', 'swiss']
 ) as dag:
 
-    load = CkanCsvStoreOperator(
+    load = CkanRedisStoreOperator(
         task_id='load',
         ckan_metadata_url=CKAN_META,
         extract_csv_urls=_CSV_URLS,
@@ -143,7 +144,7 @@ with DAG(
 
     postprocessing = EmptyOperator(task_id='postprocessing')
 
-    clean = CkanCsvDeleteOperator(
+    clean = CkanRedisDeleteOperator(
         task_id='clean',
         trigger_rule=TriggerRule.ALL_DONE,
         ckan_metadata_url=CKAN_META,
