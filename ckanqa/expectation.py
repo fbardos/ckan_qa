@@ -1,31 +1,22 @@
 import inspect
-import io
-import json
 import logging
 import os
 import sys
-from abc import ABC
-from multiprocessing import Value
-from typing import List, Optional, Sequence, Tuple, Literal
-from airflow.exceptions import AirflowException
+from typing import Any, List, Literal, Optional, Tuple
 
 import great_expectations as ge
 import pandas as pd
-import requests
 from great_expectations.core.expectation_validation_result import \
     ExpectationSuiteValidationResult
 
 from airflow.providers.mongo.hooks.mongo import MongoHook
-from airflow.providers.sftp.hooks.sftp import SFTPHook
-from airflow.providers.redis.hooks.redis import RedisHook
 from airflow.utils.context import Context
 from ckanqa.connectors import RedisConnector, SftpConnector
 
 # Use relative path for custom modules (easier to handle with airflow deployment atm)
 sys.path.append(os.path.dirname(os.path.abspath(os.path.join(__file__, '../ckanqa'))))
-from ckanqa.constant import (DEFAULT_MONGO_CONN_ID, DEFAULT_REDIS_CONN_ID, DEFAULT_SFTP_CONN_ID,
-                             RESULT_INSERT_COLLECTION)
 from ckanqa.ckan import CkanBaseOperator
+from ckanqa.constant import DEFAULT_MONGO_CONN_ID, RESULT_INSERT_COLLECTION
 
 
 class GreatExpectationsBaseOperator(CkanBaseOperator):
@@ -38,7 +29,7 @@ class GreatExpectationsBaseOperator(CkanBaseOperator):
         connector: Literal['sftp', 'redis'] = 'redis',
         source_connection_id: Optional[str] = None,
         mongo_connection_id: str = DEFAULT_MONGO_CONN_ID,
-        df_apply_func: Optional[List[Tuple[str, object]]] = None,
+        df_apply_func: Optional[List[Tuple[str, Any]]] = None,
         df_query_str: Optional[str] = None,
         **kwargs
     ):
@@ -77,10 +68,13 @@ class GreatExpectationsBaseOperator(CkanBaseOperator):
         df = df.copy()
         if self.df_apply_func:
             for col, filter in self.df_apply_func:
-                df['__filter'] = df[col].apply(filter)
-                df = df[df['__filter']]
+                ser = df[col]
+                assert isinstance(ser, pd.Series)
+                df['__filter'] = ser.apply(filter)
+                df = df[df['__filter']]  # __filter is bool and will filter from original df
                 df.drop('__filter', axis=1, inplace=True)
         if self.df_query_str:
+            assert isinstance(df, pd.DataFrame)
             df = df.query(self.df_query_str)
         logging.debug(f'EXTRACT from df: \n{df}')
         return df
