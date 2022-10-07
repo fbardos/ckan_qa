@@ -21,7 +21,6 @@ with DAG(
     tags=['ckan', 'swiss']
 ) as dag:
 
-    # FIX: Look at key in redis --> is wrong, does not contain the filename as key
     factory = CkanRedisOperatorFactory(CKAN_META)
     load = factory.create_store_operator(
         task_id='load',
