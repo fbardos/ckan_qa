@@ -9,17 +9,11 @@ from airflow.utils.trigger_rule import TriggerRule
 
 # Use relative path for custom modules (easier to handle with airflow deployment atm)
 sys.path.append(os.path.dirname(os.path.abspath(os.path.join(__file__, '../../../ckanqa'))))
-from ckanqa.ckan import (CkanPropagateResultMatrix, CkanRedisDeleteOperator,
-                         CkanRedisStoreOperator)
+from ckanqa.ckan import CkanPropagateResultMatrix, CkanRedisOperatorFactory
 from ckanqa.expectation import *
 from ckanqa.utils import generate_date_range
 
 CKAN_META = 'https://ckan.opendata.swiss/api/3/action/package_show?id=taglich-aktualisierte-meteodaten-seit-1992'
-_year = dt.datetime.now(tz=dt.timezone.utc).year
-_CSV_URLS = [
-    f'https://data.stadt-zuerich.ch/dataset/ugz_meteodaten_tagesmittelwerte/download/ugz_ogd_meteo_d1_{_year}.csv',
-]
-
 
 with DAG(
     dag_id='ckan_qa_meteodaten',
@@ -29,10 +23,10 @@ with DAG(
     tags=['ckan', 'swiss'],
 ) as dag:
 
-    load = CkanRedisStoreOperator(
+    factory = CkanRedisOperatorFactory(CKAN_META)
+    load = factory.create_store_operator(
         task_id='load',
-        ckan_metadata_url=CKAN_META,
-        extract_csv_urls=_CSV_URLS,
+        csv_pattern='^.*_{Y}\.csv'
     )
 
     checks = [
@@ -198,10 +192,9 @@ with DAG(
 
     postprocessing = EmptyOperator(task_id='postprocessing')
 
-    clean = CkanRedisDeleteOperator(
+    clean = factory.create_delete_operator(
         task_id='clean',
         trigger_rule=TriggerRule.ALL_DONE,
-        ckan_metadata_url=CKAN_META,
     )
 
     notify_matrix_all = CkanPropagateResultMatrix(task_id='notify_matrix_all', only_failed=False, short=True)

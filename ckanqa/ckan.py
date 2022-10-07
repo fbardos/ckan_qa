@@ -1,3 +1,4 @@
+from abc import abstractmethod
 import sys
 import datetime as dt
 import io
@@ -7,6 +8,7 @@ import re
 import pprint
 import logging
 import asyncio
+from abc import ABC, abstractmethod
 from typing import List, Optional, Literal
 from airflow.exceptions import AirflowException
 from airflow.models.connection import Connection
@@ -27,7 +29,7 @@ from ckanqa.matrix_hook import MatrixHook
 
 sys.path.append(os.path.dirname(os.path.abspath(os.path.join(__file__, '../ckanqa'))))
 from ckanqa.constant import DEFAULT_MONGO_CONN_ID, RESULT_INSERT_COLLECTION, DEFAULT_SFTP_CONN_ID, DEFAULT_MATRIX_CONN_ID, MATRIX_ROOM_ID_ALL, MATRIX_ROOM_ID_FAILURE, DEFAULT_REDIS_CONN_ID, REDIS_DEFAULT_TTL
-from ckanqa.connectors import SftpConnector, RedisConnector
+from ckanqa.connectors import SftpConnector, RedisConnector, BaseConnector
 
 
 
@@ -210,154 +212,208 @@ class CkanBaseOperator(BaseOperator):
         self._ckan_id = self._meta['result']['id']
 
 
-class CkanSftpBaseOperator(CkanBaseOperator):
-
-    def __init__(self, ckan_metadata_url: str, store_path: Optional[str] = os.path.join('data', 'ckan'), **kwargs):
-        super().__init__(ckan_metadata_url=ckan_metadata_url, **kwargs)
-        self._store_path = store_path
-        self.connector = SftpConnector(store_path)
-
-    @property
-    def remote_filepath(self):
-        return os.path.join(self.connector.store_path, self.ckan_id)
-
-
-class CkanSftpStoreOperator(CkanSftpBaseOperator):
-    """Stores CSVs on remote location via SFTP.
-
-    This operator will create a directory (named after CKAN ID) and store
-    all CSVs in this directory, under the specified store_path.
-
-    Args:
-        ckan_metadata_url: URL to CKAN package metadata.
-        extract_csv_urls: List of URLs to CSVs to extract and store.
-            If not set, the operator will download all CSVs from CKAN package.
-        sftp_connection_id: Connection ID for SFTP, used by Airflow.
-        store_path: Path to store on destination (SFTP).
-        **kwargs: Kwargs for Airflow task context.
-
-    """
+class CkanStoreOperator(CkanBaseOperator):
+    connector: BaseConnector
 
     def __init__(
         self,
         ckan_metadata_url: str,
+        connector: BaseConnector,
+        connection_id: str,
         extract_csv_urls: Optional[List[str]] = None,
-        sftp_connection_id: str = DEFAULT_SFTP_CONN_ID,
-        store_path: str = os.path.join('data', 'ckan'),
+        csv_pattern: Optional[str] = None,
         **kwargs
     ):
-        super().__init__(ckan_metadata_url=ckan_metadata_url, store_path=store_path, **kwargs)
+        super().__init__(ckan_metadata_url=ckan_metadata_url, **kwargs)
+        self.connector = connector
+        self.connection_id = connection_id
         self.extract_csv_urls = extract_csv_urls
-        self.sftp_connection_id = sftp_connection_id
+        self.csv_pattern = csv_pattern
 
     def execute(self, context):
-        if self.extract_csv_urls is None:
-            csv_urls = [i['download_url'] for i in self.meta['result']['resources'] if i['media_type'] == 'text/csv']
-        else:
+        assert self.meta is not None
+        if self.extract_csv_urls:
             csv_urls = self.extract_csv_urls
+        elif self.csv_pattern:
+            """Using a regex pattern on filename.
+            Supported format keywords:
+                Y (year), m (month), d (day), H (hour), M (minute)
+            Same format codes as in https://docs.python.org/3/library/datetime.html#strftime-and-strptime-format-codes
+            Don't forget to escape curly braces from Regex quantifiers with {{}}.
+            """
+            exec_date = context.get('dag_run').execution_date
+            assert exec_date is not None
+            pat = self.csv_pattern.format(
+                Y=exec_date.strftime('%Y'),
+                m=exec_date.strftime('%m'),
+                d=exec_date.strftime('%d'),
+                H=exec_date.strftime('%H'),
+                M=exec_date.strftime('%M'),
+            )
+            csv_urls = [
+                i['download_url'] for i in self.meta['result']['resources'] if bool(re.search(pat, i['download_url']))
+            ]
+        else:
+            csv_urls = [i['download_url'] for i in self.meta['result']['resources'] if i['media_type'] == 'text/csv']
         for csv in csv_urls:
             r = requests.get(csv)
             filename = re.findall(r'([-a-zA-Z0-9_]+)\.csv', csv)[0]
             self.connector.write_to_source(self.ckan_id, filename, r)
 
 
-class CkanRedisStoreOperator(CkanBaseOperator):
-    """Stores CSVs on redis.
-
-    Args:
-        ckan_metadata_url: URL to CKAN package metadata.
-        extract_csv_urls: List of URLs to CSVs to extract and store.
-            If not set, the operator will download all CSVs from CKAN package.
-        redis_connection_id: Connection ID for SFTP, used by Airflow.
-        **kwargs: Kwargs for Airflow task context.
-
-    """
+class CkanSftpStoreOperator(CkanStoreOperator):
 
     def __init__(
         self,
         ckan_metadata_url: str,
+        connector: BaseConnector,
         extract_csv_urls: Optional[List[str]] = None,
-        redis_connection_id: str = DEFAULT_REDIS_CONN_ID,
+        csv_pattern: Optional[str] = None,
+        connection_id: str = DEFAULT_SFTP_CONN_ID,
         **kwargs
     ):
-        super().__init__(ckan_metadata_url=ckan_metadata_url, **kwargs)
-        self.connector = RedisConnector()
-        self.extract_csv_urls = extract_csv_urls
-        self.redis_connection_id = redis_connection_id
-
-    def execute(self, context):
-        if self.extract_csv_urls is None:
-            csv_urls = [i['download_url'] for i in self.meta['result']['resources'] if i['media_type'] == 'text/csv']
-        else:
-            csv_urls = self.extract_csv_urls
-        for csv in csv_urls:
-            r = requests.get(csv)
-            filename = re.findall(r'([-a-zA-Z0-9_]+)\.csv', csv)[0]
-            self.connector.write_to_source(self.ckan_id, filename, r)
+        super().__init__(
+            ckan_metadata_url=ckan_metadata_url,
+            connector=connector,
+            connection_id=connection_id,
+            extract_csv_urls=extract_csv_urls,
+            csv_pattern=csv_pattern,
+            **kwargs
+        )
 
 
-class CkanSftpDeleteOperator(CkanSftpBaseOperator):
-    """Deletes stored files on remote location via SFTP.
-
-    This operator will delete all files on remote location's path,
-    and the directory (named after CKAN ID) itself.
-
-    Args:
-        ckan_metadata_url: URL to CKAN package metadata.
-        sftp_connection_id: Connection ID for SFTP, used by Airflow.
-        store_path: Path to store on destination (SFTP).
-        **kwargs: Kwargs for Airflow task context.
-
-    """
+class CkanRedisStoreOperator(CkanStoreOperator):
 
     def __init__(
         self,
         ckan_metadata_url: str,
-        connector: Literal['sftp', 'redis'] = 'redis',
-        source_connection_id: Optional[str] = None,
-        sftp_connection_id: str = DEFAULT_SFTP_CONN_ID,
-        store_path: str = os.path.join('data', 'ckan'),
+        connector: BaseConnector,
+        extract_csv_urls: Optional[List[str]] = None,
+        csv_pattern: Optional[str] = None,
+        connection_id: str = DEFAULT_REDIS_CONN_ID,
         **kwargs
     ):
-        super().__init__(ckan_metadata_url=ckan_metadata_url, store_path=store_path, **kwargs)
-        self.source_connection_id = source_connection_id
-        self.sftp_connection_id = sftp_connection_id
+        super().__init__(
+            ckan_metadata_url=ckan_metadata_url,
+            connector=connector,
+            connection_id=connection_id,
+            extract_csv_urls=extract_csv_urls,
+            csv_pattern=csv_pattern,
+            **kwargs
+        )
 
-        connector_kwargs = dict(connection_id=self.source_connection_id)
-        if connector == 'sftp':
-            self.connector = SftpConnector(**{k:v for k, v in connector_kwargs.items() if v is not None})
-        elif connector == 'redis':
-            self.connector = RedisConnector(**{k:v for k, v in connector_kwargs.items() if v is not None})
+
+class CkanDeleteOperator(CkanBaseOperator):
+
+    def __init__(self, ckan_metadata_url: str, connector: BaseConnector, **kwargs):
+        super().__init__(ckan_metadata_url=ckan_metadata_url, **kwargs)
+        self.connector = connector
 
     def execute(self, context):
         self.connector.delete_from_source(self.ckan_id)
 
 
-class CkanRedisDeleteOperator(CkanBaseOperator):
-    """Deletes stored files on remote location via SFTP.
-
-    This operator will delete all files on remote location's path,
-    and the directory (named after CKAN ID) itself.
-
-    Args:
-        ckan_metadata_url: URL to CKAN package metadata.
-        sftp_connection_id: Connection ID for SFTP, used by Airflow.
-        **kwargs: Kwargs for Airflow task context.
-
-    """
+class CkanSftpDeleteOperator(CkanDeleteOperator):
 
     def __init__(
         self,
         ckan_metadata_url: str,
-        redis_connection_id: str = DEFAULT_REDIS_CONN_ID,
+        connector: BaseConnector,
         **kwargs
     ):
-        super().__init__(ckan_metadata_url=ckan_metadata_url, **kwargs)
-        self.connector = RedisConnector()
-        self.redis_connection_id = redis_connection_id
+        super().__init__(ckan_metadata_url=ckan_metadata_url, connector=connector, **kwargs)
 
-    def execute(self, context):
-        self.connector.delete_from_source(self.ckan_id)
+
+class CkanRedisDeleteOperator(CkanDeleteOperator):
+
+    def __init__(
+        self,
+        ckan_metadata_url: str,
+        connector: BaseConnector,
+        **kwargs
+    ):
+        super().__init__(ckan_metadata_url=ckan_metadata_url, connector=connector, **kwargs)
+
+
+class CkanAbstractOperatorFactory(ABC):
+
+    def __init__(self, ckan_metadata_url: str, connection_id: str):
+        self.ckan_metadata_url = ckan_metadata_url
+        self.connection_id = connection_id
+
+    @abstractmethod
+    def create_store_operator(self) -> CkanStoreOperator:
+        pass
+
+    @abstractmethod
+    def create_delete_operator(self) -> CkanDeleteOperator:
+        pass
+
+
+class CkanSftpOperatorFactory(CkanAbstractOperatorFactory):
+    """Additional possible in **kwargs: sftp_store_path for custom store paths."""
+
+    def __init__(
+        self,
+        ckan_metadata_url: str,
+        connection_id: str = DEFAULT_SFTP_CONN_ID,
+        store_path: str = os.path.join('data', 'ckan')
+    ):
+        super().__init__(ckan_metadata_url, connection_id)
+        self.connector = SftpConnector(connection_id=connection_id, store_path=store_path)
+
+    def create_store_operator(
+        self,
+        extract_csv_urls: Optional[List[str]] = None,
+        csv_pattern: Optional[str] = None,
+        connection_id: str = DEFAULT_REDIS_CONN_ID,
+        **kwargs
+    ) -> CkanStoreOperator:
+        return CkanSftpStoreOperator(
+            ckan_metadata_url=self.ckan_metadata_url,
+            connector=self.connector,
+            extract_csv_urls=extract_csv_urls,
+            csv_pattern=csv_pattern,
+            connection_id=connection_id,
+            **kwargs
+        )
+
+    def create_delete_operator(self, **kwargs) -> CkanDeleteOperator:
+        return CkanSftpDeleteOperator(
+            ckan_metadata_url=self.ckan_metadata_url,
+            connector=self.connector,
+            **kwargs
+        )
+
+
+class CkanRedisOperatorFactory(CkanAbstractOperatorFactory):
+
+    def __init__(self, ckan_metadata_url: str, connection_id: str = DEFAULT_REDIS_CONN_ID):
+        super().__init__(ckan_metadata_url, connection_id)
+        self.connector = RedisConnector(connection_id)
+
+    def create_store_operator(
+        self,
+        extract_csv_urls: Optional[List[str]] = None,
+        csv_pattern: Optional[str] = None,
+        connection_id: str = DEFAULT_REDIS_CONN_ID,
+        **kwargs
+    ) -> CkanStoreOperator:
+        return CkanRedisStoreOperator(
+            ckan_metadata_url=self.ckan_metadata_url,
+            connector=self.connector,
+            extract_csv_urls=extract_csv_urls,
+            csv_pattern=csv_pattern,
+            connection_id=connection_id,
+            **kwargs
+        )
+
+    def create_delete_operator(self, **kwargs) -> CkanDeleteOperator:
+        return CkanRedisDeleteOperator(
+            ckan_metadata_url=self.ckan_metadata_url,
+            connector=self.connector,
+            **kwargs
+        )
 
 
 class CkanPropagateResultMatrix(BaseOperator):

@@ -8,16 +8,10 @@ from airflow.utils.trigger_rule import TriggerRule
 
 # Use relative path for custom modules (easier to handle with airflow deployment atm)
 sys.path.append(os.path.dirname(os.path.abspath(os.path.join(__file__, '../../../ckanqa'))))
-from ckanqa.ckan import (CkanRedisStoreOperator, CkanRedisDeleteOperator,
-                         CkanPropagateResultMatrix)
+from ckanqa.ckan import CkanPropagateResultMatrix, CkanRedisOperatorFactory
 from ckanqa.expectation import *
 
 CKAN_META = 'https://ckan.opendata.swiss/api/3/action/package_show?id=messwerte-der-wetterstationen-der-wasserschutzpolizei-zurich2'
-_year = dt.datetime.now(tz=dt.timezone.utc).year
-_CSV_URLS = [
-    f'https://data.stadt-zuerich.ch/dataset/sid_wapo_wetterstationen/download/messwerte_tiefenbrunnen_{_year}.csv',
-    f'https://data.stadt-zuerich.ch/dataset/sid_wapo_wetterstationen/download/messwerte_mythenquai_{_year}.csv',
-]
 
 with DAG(
     dag_id='ckan_qa_wasser',
@@ -27,10 +21,11 @@ with DAG(
     tags=['ckan', 'swiss']
 ) as dag:
 
-    load = CkanRedisStoreOperator(
+    # FIX: Look at key in redis --> is wrong, does not contain the filename as key
+    factory = CkanRedisOperatorFactory(CKAN_META)
+    load = factory.create_store_operator(
         task_id='load',
-        ckan_metadata_url=CKAN_META,
-        extract_csv_urls=_CSV_URLS,
+        csv_pattern='^.*_{Y}\.csv'
     )
 
     checks = [
@@ -144,10 +139,9 @@ with DAG(
 
     postprocessing = EmptyOperator(task_id='postprocessing')
 
-    clean = CkanRedisDeleteOperator(
+    clean = factory.create_delete_operator(
         task_id='clean',
         trigger_rule=TriggerRule.ALL_DONE,
-        ckan_metadata_url=CKAN_META,
     )
 
     notify_matrix_all = CkanPropagateResultMatrix(task_id='notify_matrix_all', only_failed=False, short=True)

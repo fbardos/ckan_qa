@@ -8,8 +8,7 @@ from airflow.utils.trigger_rule import TriggerRule
 
 # Use relative path for custom modules (easier to handle with airflow deployment atm)
 sys.path.append(os.path.dirname(os.path.abspath(os.path.join(__file__, '../../../ckanqa'))))
-from ckanqa.ckan import (CkanPropagateResultMatrix, CkanRedisDeleteOperator,
-                         CkanRedisStoreOperator)
+from ckanqa.ckan import CkanPropagateResultMatrix, CkanRedisOperatorFactory
 from ckanqa.expectation import *
 
 CKAN_META = 'https://ckan.opendata.swiss/api/3/action/package_show?id=web-analytics-des-webauftritts-des-kantons-zurich-ab-juli-2020'
@@ -23,9 +22,9 @@ with DAG(
     tags=['ckan', 'swiss'],
 ) as dag:
 
-    load = CkanRedisStoreOperator(
+    factory = CkanRedisOperatorFactory(CKAN_META)
+    load = factory.create_store_operator(
         task_id='load',
-        ckan_metadata_url=CKAN_META
     )
 
     checks = [
@@ -51,10 +50,9 @@ with DAG(
 
     postprocessing = EmptyOperator(task_id='postprocessing')
 
-    clean = CkanRedisDeleteOperator(
+    clean = factory.create_delete_operator(
         task_id='clean',
         trigger_rule=TriggerRule.ALL_DONE,
-        ckan_metadata_url=CKAN_META,
     )
 
     notify_matrix_all = CkanPropagateResultMatrix(task_id='notify_matrix_all', only_failed=False, short=True)
