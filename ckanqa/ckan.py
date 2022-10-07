@@ -1,36 +1,28 @@
-from abc import abstractmethod
-import sys
-import datetime as dt
-import io
-import json
-import os
-import re
-import pprint
-import logging
 import asyncio
+import json
+import logging
+import os
+import pprint
+import re
+import sys
 from abc import ABC, abstractmethod
-from typing import List, Optional, Literal
-from airflow.exceptions import AirflowException
-from airflow.models.connection import Connection
-from redis import Redis
+from typing import List, Optional
 
 import requests
 
+from airflow.models import Variable
+from airflow.models.baseoperator import BaseOperator
 from airflow.providers.mongo.hooks.mongo import MongoHook
 from airflow.providers.redis.hooks.redis import RedisHook
-from airflow.utils.email import send_email_smtp
-from airflow.models.baseoperator import BaseOperator
-from airflow.providers.sftp.hooks.sftp import SFTPHook
 from airflow.utils.context import Context
-from airflow.models import Variable
-from sqlalchemy.sql.sqltypes import Boolean
-
 from ckanqa.matrix_hook import MatrixHook
 
 sys.path.append(os.path.dirname(os.path.abspath(os.path.join(__file__, '../ckanqa'))))
-from ckanqa.constant import DEFAULT_MONGO_CONN_ID, RESULT_INSERT_COLLECTION, DEFAULT_SFTP_CONN_ID, DEFAULT_MATRIX_CONN_ID, MATRIX_ROOM_ID_ALL, MATRIX_ROOM_ID_FAILURE, DEFAULT_REDIS_CONN_ID, REDIS_DEFAULT_TTL
-from ckanqa.connectors import SftpConnector, RedisConnector, BaseConnector
-
+from ckanqa.connectors import BaseConnector, RedisConnector, SftpConnector
+from ckanqa.constant import (DEFAULT_MATRIX_CONN_ID, DEFAULT_MONGO_CONN_ID,
+                             DEFAULT_REDIS_CONN_ID, DEFAULT_SFTP_CONN_ID,
+                             MATRIX_ROOM_ID_ALL, MATRIX_ROOM_ID_FAILURE,
+                             REDIS_DEFAULT_TTL, RESULT_INSERT_COLLECTION)
 
 
 class ResultsExtractor:
