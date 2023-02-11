@@ -39,10 +39,22 @@ class CkanContext:
         }
 
     """
+    PERSISTED_PROPERTIES = [
+        'ckan_name',
+        'dag_runtime',
+        'ckan_api_base_url',
+        'connector_class',
+        'airflow_connection_id',
+        'data_bucket_name',
+        'data_connector_name',
+        'datasource_name',
+        'batch_request_data_asset_name',
+        'boto3_options',
+        'selected_checkpoint',
+        'checkpoint_configs',
+        'checkpoint_success',
+    ]
     # TODO: Are ther other configs, which can be made obsolete, because consistently persisted to S3?
-    # TODO: Propagate to all AirflowOperators and make sure, that the load the data from Redis if already existent
-    #   (instead of rewriting back to defaults)
-    # TODO: Maybe, it is better, when there is no TTL for all of the attributes here. Otherwise, it's hard to debug, if it takes longer.
 
     # One context is uniquely identified by ckan_name and dag_runtime
     def __init__(
@@ -62,19 +74,11 @@ class CkanContext:
         self.dag_runtime = dag_runtime
 
         # IF import is set, check, whether all keys are available on Redis
+        # Skip the first two properties, because they are part of the key
         if import_from_redis:
             try:
-                self.ckan_api_base_url
-                self.connector_class
-                self.airflow_connection_id
-                self.data_bucket_name
-                self.data_connector_name
-                self.datasource_name
-                self.batch_request_data_asset_name
-                self.boto3_options
-                self.selected_checkpoint
-                self.checkpoint_configs
-                self.checkpoint_success
+                for property in self.PERSISTED_PROPERTIES[2:]:
+                    getattr(self, property)
             except KeyError:
                 raise Exception('Not all expected keys from CkanContext are found on Redis. Cannot import.')
 
@@ -134,6 +138,20 @@ class CkanContext:
                 raise ValueError(f'Insert value for Redis is of type {type(value)} instead of str.')
             conn.set(key, value, ex=ttl)
             logging.debug(f'REDIS WRITE: key {key}, value {value[:20]}, ttl {ttl}')
+
+    def _redis_delete(self, property: str) -> None:
+        hook = RedisHook(DEFAULT_REDIS_CONN_ID)
+        key = self._build_key(property)
+        with hook.get_conn() as conn:
+            if not conn.exists(key):
+                raise KeyError(f'Redis key {key} not found.')
+            conn.delete(key)
+            logging.debug(f'REDIS DELETE: key {key}')
+
+    def delete_context_redis(self):
+        """Deletes all persisted properties from redis."""
+        for property in self.PERSISTED_PROPERTIES[2:]:
+            self._redis_delete(property)
 
     @property
     def ckan_metadata(self):

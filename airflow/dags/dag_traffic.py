@@ -17,7 +17,7 @@ import datetime as dt
 
 from airflow import DAG
 from ckanqa.operator.ckan import (CkanDeleteOperator, CkanExtractOperator,
-                                  CkanParquetOperator)
+                                  CkanParquetOperator, CkanDeleteContextOperator)
 from ckanqa.operator.greatexpectations import (CkanContextSetter,
                                                GeBatchRequestOnS3Operator,
                                                GeBuildCheckpointOperator,
@@ -168,4 +168,9 @@ with DAG(
         ckan_name=CKAN_NAME,
     )
 
-t0 >> t1 >> t2 >> t3 >> t3_2 >> t4 >> expectations >> t6 >> t7 >> t8
+    t9 = CkanDeleteContextOperator(
+        task_id='delete_context',
+        ckan_name=CKAN_NAME,
+    )
+
+t0 >> t1 >> t2 >> t3 >> t3_2 >> t4 >> expectations >> t6 >> t7 >> t8 >> t9

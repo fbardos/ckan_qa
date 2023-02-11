@@ -304,6 +304,23 @@ class CkanDeleteOperator(CkanBaseOperator):
             hook.delete_files(parquets)
 
 
+class CkanDeleteContextOperator(CkanBaseOperator):
+    """Delete persistet CkanContext from Redis """
+
+    def __init__(
+        self,
+        ckan_name: str,
+        keep_when_failed: bool = True,
+        **kwargs
+    ):
+        super().__init__(ckan_name=ckan_name, **kwargs)
+        self.keep_when_failed = keep_when_failed
+
+    def execute(self, context):
+        ckan_context = CkanContext.generate_context_from_airflow_execute(self, context, import_from_redis=True)
+        ckan_context.delete_context_redis()
+
+
 # TODO: Currently not needed?
 # class CkanStoreOperator(CkanBaseOperator):
     # connector: BaseConnector
