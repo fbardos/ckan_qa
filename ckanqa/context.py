@@ -197,7 +197,6 @@ class CkanContext:
     def ckan_api_base_url(self) -> str:
         return self._redis_get(inspect.stack()[0][3])
 
-    # TODO: _redis_set is mostly called without any expiry --> add cleanup operator to clean all keys when done
     @ckan_api_base_url.setter
     def ckan_api_base_url(self, value: str) -> None:
         self._redis_set(inspect.stack()[0][3], value, ttl=None)
