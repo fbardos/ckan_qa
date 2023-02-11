@@ -1,24 +1,20 @@
 import inspect
 import logging
-import os
-import sys
 from typing import Any, List, Literal, Optional, Tuple
 
-import great_expectations as ge
 import pandas as pd
 from great_expectations.core.expectation_validation_result import \
     ExpectationSuiteValidationResult
 
+import great_expectations as ge
 from airflow.providers.mongo.hooks.mongo import MongoHook
 from airflow.utils.context import Context
 from ckanqa.connectors import RedisConnector, SftpConnector
-
-# Use relative path for custom modules (easier to handle with airflow deployment atm)
-sys.path.append(os.path.dirname(os.path.abspath(os.path.join(__file__, '../ckanqa'))))
-from ckanqa.ckan import CkanBaseOperator
 from ckanqa.constant import DEFAULT_MONGO_CONN_ID, RESULT_INSERT_COLLECTION
+from ckanqa.operator.base import CkanBaseOperator
 
 
+# TODO: Maybe not used anymore??
 class GreatExpectationsBaseOperator(CkanBaseOperator):
     METHOD_NAME: str
 
@@ -43,9 +39,9 @@ class GreatExpectationsBaseOperator(CkanBaseOperator):
 
         connector_kwargs = dict(connection_id=self.source_connection_id)
         if connector == 'sftp':
-            self.connector = SftpConnector(**{k:v for k, v in connector_kwargs.items() if v is not None})
+            self.connector = SftpConnector(**{k: v for k, v in connector_kwargs.items() if v is not None})
         elif connector == 'redis':
-            self.connector = RedisConnector(**{k:v for k, v in connector_kwargs.items() if v is not None})
+            self.connector = RedisConnector(**{k: v for k, v in connector_kwargs.items() if v is not None})
 
     def _generate_df_apply_func_string(self):
         if self.df_apply_func is None:
