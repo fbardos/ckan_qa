@@ -16,10 +16,11 @@ Without spark, but with minio. Can be changed later.
 import datetime as dt
 
 from airflow import DAG
-from ckanqa.operator.ckan import (CkanDeleteOperator, CkanExtractOperator,
-                                  CkanParquetOperator, CkanDeleteContextOperator)
-from ckanqa.operator.greatexpectations import (CkanContextSetter,
-                                               GeBatchRequestOnS3Operator,
+from ckanqa.operator.ckan import (CkanDeleteContextOperator,
+                                  CkanDeleteOperator, CkanExtractOperator,
+                                  CkanParquetOperator)
+from ckanqa.operator.context import CkanContextSetter
+from ckanqa.operator.greatexpectations import (GeBatchRequestOnS3Operator,
                                                GeBuildCheckpointOperator,
                                                GeBuildExpectationOperator,
                                                GeCheckSuiteOperator,

@@ -54,7 +54,7 @@ class CkanContext:
         'checkpoint_configs',
         'checkpoint_success',
     ]
-    # TODO: Are ther other configs, which can be made obsolete, because consistently persisted to S3?
+    # TODO: Are ther other GE configs, which can be made obsolete, because consistently persisted to S3?
 
     # One context is uniquely identified by ckan_name and dag_runtime
     def __init__(
@@ -188,7 +188,7 @@ class CkanContext:
     def default_datasource_name(self):
         return '@'.join(['datasource', self.suite_name])
 
-    # Is set always on GeBatchRequestOnS3Operator
+    # Currently not needed, is set always on GeBatchRequestOnS3Operator
     # @property
     # def default_data_asset_name(self):
         # return '@'.join(['default_data_asset_name', self.suite_name])
