@@ -17,18 +17,6 @@ from ckanqa.hook import GreatExpectationsHook
 from ckanqa.operator.ckan import CkanBaseOperator
 
 
-class CkanContextSetter(CkanBaseOperator):
-
-    def __init__(self, ckan_name: str, **kwargs):
-        super().__init__(ckan_name=ckan_name, **kwargs)
-
-    def execute(self, context):
-        ckan_context = CkanContext.generate_context_from_airflow_execute(self, context, import_from_redis=False)
-        ckan_context.datasource_name = ckan_context.default_datasource_name
-        ckan_context.selected_checkpoint = ckan_context.default_checkpoint_name
-        ckan_context.attach_empty_checkpoint_config()
-
-
 class GeCheckSuiteOperator(CkanBaseOperator):
     """ Checks, if the desired suite is present.
 
@@ -85,7 +73,7 @@ class GeRemoveExpectationsOperator(CkanBaseOperator):
                 expectation_configuration=self.expectation_configuration,
                 remove_multiple_matches=self.remove_multiple_matches,
             )
-            ge_context.save_expectation_suite(expectation_suite=suite, expectation_suite_name=self.suite_name)
+            ge_context.save_expectation_suite(expectation_suite=suite, expectation_suite_name=ckan_context.suite_name)
 
 
 class GeBatchRequestOnS3Operator(CkanBaseOperator):
