@@ -27,11 +27,6 @@ from ckanqa.operator.greatexpectations import (GeBatchRequestOnS3Operator,
                                                GeExecuteCheckpointOperator,
                                                GeRemoveExpectationsOperator)
 
-# TODO: NEEDS Rewrite
-# TODO: Any ideas of how to handle expectations on subsets of parquet file?
-#  --> maybe use subtask (python code) to extract selected subset...
-#  --> If so, use dataframe batch operator...
-
 CKAN_NAME = 'web-analytics-des-webauftritts-des-kantons-zurich-ab-juli-2020'
 
 with DAG(
