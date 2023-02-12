@@ -89,18 +89,20 @@ class GeBatchRequestOnS3Operator(CkanBaseOperator):
     def __init__(
         self,
         ckan_name: str,
-        batch_request_data_asset_name: str,
+        data_asset_name: str,  # Is part of the filename, extracted as regex group
         datasource_name: Optional[str] = None,
         regex_filter: str = r'.*',
         regex_filter_groups: List['str'] = ['data_asset_name'],
+        data_connector_query: Optional[dict] = None,
         prefix: Optional[str] = None,
         **kwargs
     ):
         super().__init__(ckan_name=ckan_name, **kwargs)
-        self.batch_request_data_asset_name = batch_request_data_asset_name
+        self.data_asset_name = data_asset_name
         self.datasource_name = datasource_name
         self.regex_filter = regex_filter
         self.regex_filter_groups = regex_filter_groups
+        self.data_connector_query = data_connector_query
         self.prefix = prefix
 
     def execute(self, context):
@@ -182,7 +184,8 @@ class GeBatchRequestOnS3Operator(CkanBaseOperator):
         batch_request_config = dict(
             datasource_name=ckan_context.datasource_name,
             data_connector_name=ckan_context.data_connector_name,
-            data_asset_name=self.batch_request_data_asset_name,
+            data_asset_name=self.data_asset_name,
+            data_connector_query=self.data_connector_query,
         )
         batch_request = BatchRequest(**batch_request_config)
         ckan_context.add_batch_request_config(batch_request_config)

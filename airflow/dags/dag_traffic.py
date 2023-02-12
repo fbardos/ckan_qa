@@ -70,7 +70,7 @@ with DAG(
         ckan_name=CKAN_NAME,
         regex_filter=r'(.*)/(.*)/(.*)_(h\d)_(\d{4})\.parquet$',
         regex_filter_groups=['ckan_name', 'dag_run', 'data_asset_name', 'semester', 'year'],
-        batch_request_data_asset_name='ugz_ogd_traffic_rosengartenbruecke',
+        data_asset_name='ugz_ogd_traffic_rosengartenbruecke',
     )
 
     # Can be executed in parallel, because do not get stored in CkanContext

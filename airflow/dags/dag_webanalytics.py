@@ -68,7 +68,7 @@ with DAG(
         ckan_name=CKAN_NAME,
         regex_filter=r'(.*)/(.*)/(.*)\.parquet$',
         regex_filter_groups=['ckan_name', 'dag_run', 'data_asset_name'],
-        batch_request_data_asset_name='data_stat',
+        data_asset_name='data_stat',
     )
 
     expectations = [
