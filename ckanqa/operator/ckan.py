@@ -2,7 +2,7 @@ import io
 import logging
 import pprint
 import re
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import requests
 
@@ -223,18 +223,25 @@ class CkanParquetOperator(CkanBaseOperator):
         ckan_metadata_url: URL to CKAN metadata.
         connector:
         connection_id: Name of the stored Airlfow connection for storage.
+        split_by_column_group: If given, creates one separate .parquet file
+            for each group column. E.g. if column `parameter` contains
+            distinct values `CO2` and `O3`, then it will create
+            two .parquet files per single .csv.
 
     """
+    # TODO: Maybe add a parameter with expected split_by_column_group values?
     def __init__(
         self,
         ckan_name: str,
-        filelist: Optional[List[str]] = None,
-        file_regex: Optional[str] = None,
+        filelist: Optional[List[str]] = None,  # TODO: Currently not implemented
+        file_regex: Optional[str] = None,  # TODO: Currently not implemented
+        split_by_column_group: Optional[Union[str, List[str]]] = None,
         **kwargs
     ):
         super().__init__(ckan_name=ckan_name, **kwargs)
         self.filelist = filelist
         self.file_regex = file_regex
+        self.split_by_column_group = split_by_column_group
 
     def execute(self, context):
         ckan_context = CkanContext.generate_context_from_airflow_execute(self, context, import_from_redis=True)
@@ -243,14 +250,25 @@ class CkanParquetOperator(CkanBaseOperator):
         dag_run_timestamp = ckan_context.dag_runtime_iso_8601_basic
 
         # Iterate over files
-        # TODO: Implement filelist, file_regex
-        # TODO: Implement for more than just CSVs...
         hook = CkanDataHook(ckan_context.airflow_connection_id)
         for path, df in hook.load_dataframe_from_filetype(self.ckan_name, dag_run_timestamp, '.csv'):
-            filename = re.sub(r'.*/([^/]+)\.csv', r'\1.parquet', path)
-            buffer = io.BytesIO()
-            df.to_parquet(buffer)
-            hook.write_from_buffer(self.ckan_name, dag_run_timestamp, filename, buffer)
+            if self.split_by_column_group:
+                sub_dfs = [(group, sdf) for group, sdf in df.groupby(self.split_by_column_group)]
+                for group_values, sub_df in sub_dfs:
+                    filename = re.sub(r'.*/([^/]+)\.csv', r'\1.parquet', path)
+                    if isinstance(group_values, str):
+                        group_values = (group_values, )
+                    assert isinstance(group_values, tuple)
+                    for group_value in group_values:
+                        filename = re.sub(r'(.*)(\.parquet)', r'\1__' + group_value + r'\2', filename)
+                    buffer = io.BytesIO()
+                    sub_df.to_parquet(buffer)
+                    hook.write_from_buffer(self.ckan_name, dag_run_timestamp, filename, buffer)
+            else:
+                filename = re.sub(r'.*/([^/]+)\.csv', r'\1.parquet', path)
+                buffer = io.BytesIO()
+                df.to_parquet(buffer)
+                hook.write_from_buffer(self.ckan_name, dag_run_timestamp, filename, buffer)
 
 
 class CkanDeleteOperator(CkanBaseOperator):
