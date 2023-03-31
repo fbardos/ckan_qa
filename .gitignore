@@ -5,11 +5,7 @@
 great_expectations/
 
 # Exclude Airflow specific files
-airflow/airflow.cfg
-airflow/airflow.db
-airflow/logs/
-airflow/unittests.cfg
-airflow/webserver_config.py
+airflow/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
