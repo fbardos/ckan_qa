@@ -1,41 +1,77 @@
 """
 Contains Operators for Airflow.
 """
-import json
 import logging
-from typing import Dict, List, Optional
+import os
+from collections.abc import Sequence
+from typing import Optional, Sequence
 
-from great_expectations.core.batch import BatchRequest
+from dotenv import load_dotenv
+from great_expectations.core.batch import BatchMarkers, BatchRequest
 from great_expectations.core.expectation_configuration import \
     ExpectationConfiguration
 from ruamel import yaml
 
-from airflow.hooks.base import BaseHook
-from ckanqa.constant import DEFAULT_S3_CONN_ID
+from ckanqa.config import ValidationConfig
 from ckanqa.context import CkanContext
 from ckanqa.hook import GreatExpectationsHook
 from ckanqa.operator.ckan import CkanBaseOperator
 
 
-class GeCheckSuiteOperator(CkanBaseOperator):
-    """ Checks, if the desired suite is present.
+load_dotenv()
+S3_BUCKET_NAME_META = os.environ['CKANQA__CONFIG__S3_BUCKET_NAME_META']
 
-    Otherwise, creates it.
-    Name of the suite is automatically generated with the following syntax:
-        org-name/dataset-name
 
-    """
+class CkanBaseOperatorMeta(CkanBaseOperator):
 
     def __init__(self, ckan_name: str, **kwargs):
         super().__init__(ckan_name=ckan_name, **kwargs)
+        if v := kwargs.get('bucket_name', None):
+            self.bucket_name = v
+        else:
+            self.bucket_name = S3_BUCKET_NAME_META
+
+    def build_ge_hook(self, ckan_context: CkanContext) -> GreatExpectationsHook:
+        return GreatExpectationsHook(ckan_context.airflow_connection_id, bucket_name=self.bucket_name)
+
+
+class GeBuildExpectationOperator(CkanBaseOperatorMeta):
+    """Register Ge datasource via pandas DataFrame.
+
+    Suite name gets automatically generated.
+
+    """
+    def __init__(
+        self,
+        ckan_name: str,
+        suite_name: str,
+        expectation_config: ExpectationConfiguration | Sequence[ExpectationConfiguration],
+        **kwargs
+    ):
+        super().__init__(ckan_name=ckan_name, **kwargs)
+        self.suite_name = suite_name
+        if isinstance(expectation_config, ExpectationConfiguration):
+            self.expectation_config = [expectation_config]
+        else:
+            self.expectation_config = expectation_config
 
     def execute(self, context):
+        """
+
+        Does not save any config to ckan_context, otherwise, not parallelization
+        would be possible.
+
+        """
         ckan_context = CkanContext.generate_context_from_airflow_execute(self, context, import_from_redis=True)
-        hook = GreatExpectationsHook(ckan_context.airflow_connection_id)
-        hook.get_suite(ckan_context.suite_name)
+        hook = self.build_ge_hook(ckan_context)
+        _ = hook.get_suite(self.suite_name)
+
+        # No suite saving requred. Gets automatically persisted.
+        for expectation_config in self.expectation_config:
+            _ = hook.add_expectation(self.suite_name, expectation_config)
 
 
-class GeRemoveExpectationsOperator(CkanBaseOperator):
+class GeRemoveExpectationsOperator(CkanBaseOperatorMeta):
     """ Removes existing expectation, for later recreation.
 
     Args:
@@ -46,11 +82,13 @@ class GeRemoveExpectationsOperator(CkanBaseOperator):
     def __init__(
         self,
         ckan_name: str,
+        suite_name: str,
         expectation_configuration: Optional[ExpectationConfiguration] = None,
         remove_multiple_matches: bool = True,
         **kwargs
     ):
         super().__init__(ckan_name=ckan_name, **kwargs)
+        self.suite_name = suite_name
         self.remove_multiple_matches = remove_multiple_matches
         if expectation_configuration:
             self.expectation_configuration = expectation_configuration
@@ -62,9 +100,9 @@ class GeRemoveExpectationsOperator(CkanBaseOperator):
 
     def execute(self, context):
         ckan_context = CkanContext.generate_context_from_airflow_execute(self, context, import_from_redis=True)
-        hook = GreatExpectationsHook(ckan_context.airflow_connection_id)
-        ge_context = hook.get_context()
-        suite = hook.get_suite(ckan_context.suite_name)
+        hook = self.build_ge_hook(ckan_context)
+        ge_context = hook.get_base_data_context()
+        suite = hook.get_suite(self.suite_name)
         logging.debug(f'Currently saved expectations: {suite.expectations}')
         if len(suite.expectations) == 0:
             logging.warning('There were no saved expectations. Skip.')
@@ -73,238 +111,135 @@ class GeRemoveExpectationsOperator(CkanBaseOperator):
                 expectation_configuration=self.expectation_configuration,
                 remove_multiple_matches=self.remove_multiple_matches,
             )
-            ge_context.save_expectation_suite(expectation_suite=suite, expectation_suite_name=ckan_context.suite_name)
+            ge_context.save_expectation_suite(expectation_suite=suite, expectation_suite_name=self.suite_name)
 
 
-class GeBatchRequestOnS3Operator(CkanBaseOperator):
-    """Register GE datasource from S3 using pandas.
+class GeRunValidator(CkanBaseOperatorMeta):
+    """Version 2
 
+    One per data asset.
+        --> One per combination of:
+            - ValidationConfig.data_connector_query
+            - ValidationConfig.data_asset_name
 
-    Alternative would be:
-        - to load datasource as pandas dataframe during DAG run.
-        - to load with Spark instead of pandas.
+    Currently, only reading from csv/parquet is supported. Maybe, it makes sense to also allow
+    pandas DataFrames to be passed.
 
     """
 
     def __init__(
         self,
-        ckan_name: str,
-        data_asset_name: str,  # Is part of the filename, extracted as regex group
-        datasource_name: Optional[str] = None,
-        regex_filter: str = r'.*',
-        regex_filter_groups: List['str'] = ['data_asset_name'],
-        data_connector_query: Optional[dict] = None,
-        prefix: Optional[str] = None,
+        validation_config: ValidationConfig,
+        s3_prefix: Optional[str] = None,
         **kwargs
     ):
-        super().__init__(ckan_name=ckan_name, **kwargs)
-        self.data_asset_name = data_asset_name
-        self.datasource_name = datasource_name
-        self.regex_filter = regex_filter
-        self.regex_filter_groups = regex_filter_groups
-        self.data_connector_query = data_connector_query
-        self.prefix = prefix
+        self.validation_config = validation_config
+        super().__init__(ckan_name=self.validation_config.ckan_name, **kwargs)
 
-    def execute(self, context):
-        ckan_context = CkanContext.generate_context_from_airflow_execute(self, context, import_from_redis=True)
+        self.s3_prefix = s3_prefix
 
-        # If datasource_name is set, overwrite
-        if self.datasource_name:
-            ckan_context.datasource_name = self.datasource_name
-
-        # If prefix == None, then generate according to suspected path:
-        #   ckan_name/iso_date
-        if not self.prefix:
-            # TODO: DRY: Prefix-generation is defined on multiple locations
-            dag_run_timestamp = ckan_context.dag_runtime_iso_8601_basic
-            self.prefix = '/'.join([self.ckan_name, dag_run_timestamp])
-
-        # Generate boto3_options
-        # TODO: DRY: Already used in ge_hook.GreatExpectationsHook
-        # TODO: Better would be to use as custom S3 Hook instead.
-        credentials = BaseHook.get_connection(conn_id=ckan_context.airflow_connection_id)
-        boto3_options = {
-            'endpoint_url': json.loads(credentials.get_extra())['endpoint_url'],
-            'aws_access_key_id': credentials.login,
-            'aws_secret_access_key': credentials._password,
-        }
-        ckan_context.boto3_options = boto3_options
-
-        # Generate GE datasource config
-        bucket = ckan_context.data_bucket_name
-        # batch_identifier_name = 'parquet_batch'  # TODO: Add to context? --> currently not needed
+    def _generate_datasource_config(
+        self,
+        datasource_name: str,
+        data_connector_name: str,
+        data_bucket_name: str,
+        s3_prefix: str,
+        boto3_options: dict,
+    ) -> dict:
+        """Currently only supports S3"""
+        bucket = data_bucket_name
+        prefix = s3_prefix
         datasource_config = {
-            'name': ckan_context.datasource_name,
+            'name': datasource_name,
             'class_name': 'Datasource',
             'execution_engine': {
                 'class_name': 'PandasExecutionEngine',
-                'boto3_options': boto3_options,  # This needs to set manually
+                'boto3_options': boto3_options,
             },
             'data_connectors': {
-                # data_connector_name: {
-                    # 'class_name': 'RuntimeDataConnector',
-                    # 'batch_identifiers': [batch_identifier_name],
-                # },
-                ckan_context.data_connector_name: {
+                data_connector_name: {
                     'class_name': 'InferredAssetS3DataConnector',
-                    # TODO: What about proto3 options??
-                    'bucket': bucket if not bucket.endswith('/') else bucket + '/',
-                    'prefix': self.prefix if not self.prefix.endswith('/') else self.prefix + '/',
+                    'bucket':  bucket if not bucket.endswith('/') else bucket + '/',
+                    'prefix': prefix if not prefix.endswith('/') else prefix + '/',
                     'boto3_options': boto3_options,
                     'default_regex': {
-                        'pattern': self.regex_filter,
+                        'pattern': self.validation_config.regex_filter,
                         # You can assign group names to regex groups here.
                         # With this regex, you can assign data_asset_name
                         # to a group of the regex search.
-                        'group_names': self.regex_filter_groups,
+                        'group_names': self.validation_config.regex_filter_groups,
                     },
                 },
             },
         }
-        ckan_context.add_datasource_config(datasource_config)
+        return datasource_config
 
-        # Validate config
-        hook = GreatExpectationsHook(ckan_context.airflow_connection_id)
-        ge_context = hook.get_context()
-        suite = hook.get_suite(ckan_context.suite_name)
+    def execute(self, context):
+
+        # According to GE Docs, when using an experimental expectation, an import is needed
+        # when Expectation Suite is created AND when checkpoint is defined and run.
+        from great_expectations_experimental.expectations.expect_column_values_to_change_between import \
+            ExpectColumnValuesToChangeBetween
+
+        ckan_context = CkanContext.generate_context_from_airflow_execute(self, context, import_from_redis=True)
+        hook = self.build_ge_hook(ckan_context)
+        ge_context = hook.get_base_data_context()
+        # suite = hook.get_suite(self.validation_config.suite_name)
+
+        if self.s3_prefix is None:
+            self.s3_prefix = ckan_context.default_s3_data_prefix
+
+        # Datasource
+        datasource_config = self._generate_datasource_config(
+            datasource_name=ckan_context.default_datasource_name,
+            data_connector_name=ckan_context.default_data_connector_name,
+            data_bucket_name=ckan_context.data_bucket_name,
+            s3_prefix=self.s3_prefix,
+            boto3_options=ckan_context.boto3_options,
+        )
         ge_context.test_yaml_config(yaml.dump(datasource_config))
-
-        # Save datasource
-        datasource = ge_context.add_datasource(**datasource_config, save_changes=True)
-
-        # Print information about the data assets
-        logging.info('datasource self-check', datasource.self_check())
-
-
-        # TODO: I think, this is not needed. Gets rewritten by validator.save_expectation_suite()
-        # ge_context.save_expectation_suite(suite, expectation_suite_name=self.suite_name)
-
-        # Create BatchRequest (RuntimeBatchRequest is only needed when passing a in-memory dataframe to validator).
-        # TODO: Add additional operator for RuntimeBatchRequest...
-        batch_request_config = dict(
-            datasource_name=ckan_context.datasource_name,
-            data_connector_name=ckan_context.data_connector_name,
-            data_asset_name=self.data_asset_name,
-            data_connector_query=self.data_connector_query,
-        )
-        batch_request = BatchRequest(**batch_request_config)
-        ckan_context.add_batch_request_config(batch_request_config)
-
-        validator = ge_context.get_validator(
-            batch_request=batch_request, expectation_suite_name=ckan_context.suite_name
-        )
-        validator.save_expectation_suite(discard_failed_expectations=False)
-
-
-class GeBuildExpectationOperator(CkanBaseOperator):
-    """Register Ge datasource via pandas DataFrame.
-
-    Suite name gets automatically generated.
-
-    """
-    def __init__(
-        self,
-        ckan_name: str,
-        expectation_type: str,
-        ge_kwargs: Dict,
-        ge_meta: Optional[Dict] = None,
-        connection_id: str = DEFAULT_S3_CONN_ID,
-        **kwargs
-    ):
-        super().__init__(ckan_name=ckan_name, **kwargs)
-        self.expectation_type = expectation_type
-        self.ge_meta = ge_meta
-        self.ge_kwargs = ge_kwargs
-        self.connection_id = connection_id
-
-    def execute(self, context):
-        """
-
-        Does not save any config to ckan_context, otherwise, not parallelization
-        would be possible.
-
-        """
-        ckan_context = CkanContext.generate_context_from_airflow_execute(self, context, import_from_redis=True)
-
-        hook = GreatExpectationsHook(self.connection_id)
-        suite = hook.get_suite(ckan_context.suite_name)
-        expectation_config = dict(
-            suite_name=ckan_context.suite_name,
-            expectation_type=self.expectation_type,
-            meta=self.ge_meta,
-            **self.ge_kwargs
+        ge_context.add_datasource(
+            **datasource_config,
+            save_changes=True
         )
 
-        # No suite saving requred. Gets automatically persisted.
-        _ = hook.add_expectation(**expectation_config)
-        # self.ckan_context.append_expectation_config(expectation_config)
-
-
-class GeBuildCheckpointOperator(CkanBaseOperator):
-    """A Checkpoint runs an Expectation Suite against a Batch (or Batch Request).
-
-    Runs checkpoint after creation?
-    """
-
-    def __init__(
-        self,
-        ckan_name: str,
-        checkpoint_name: Optional[str] = None,
-        **kwargs
-    ):
-        super().__init__(ckan_name=ckan_name, **kwargs)
-        self.checkpoint_name = checkpoint_name
-
-    def execute(self, context):
-        ckan_context = CkanContext.generate_context_from_airflow_execute(self, context, import_from_redis=True)
-        if self.checkpoint_name is None:
-            self.checkpoint_name = ckan_context.default_checkpoint_name
-        hook = GreatExpectationsHook(ckan_context.airflow_connection_id)
-        # ge_context = hook.get_context()
-        # suite = ge_context.get_expectation_suite(self.suite_name)
-        checkpoint_config = dict(
-            suite_name=ckan_context.suite_name,
-            checkpoint_name=self.checkpoint_name,
+        # BatchRequest
+        batch_markers = BatchMarkers(
+            {
+                'airflow_dagrun': context.get('dag_run').run_id,
+                # Not sure if this is the intended way to do it. In Data Docs --> Validation info,
+                # ge_load_time is listed twice.
+                'ge_load_time': self.get_dag_runtime_iso_8601_basic(context),  # overwritten from default behaviour
+            }
         )
-        checkpoint = hook.add_checkpoint(**checkpoint_config)
-        # ge_context.save_expectation_suite(expectation_suite=suite)
-        ckan_context.add_checkpoint_config(checkpoint_config)
 
+        batch_request = BatchRequest(
+            datasource_name=ckan_context.default_datasource_name,
+            data_connector_name=ckan_context.default_data_connector_name,
+            data_asset_name=self.validation_config.data_asset_name,
+            data_connector_query=self.validation_config.data_connector_query,
+            batch_spec_passthrough={'batch_markers': batch_markers}
+        )
 
-class GeExecuteCheckpointOperator(CkanBaseOperator):
+        # For GreatExpectations > 0.13.8, validating data without any checkpoint is
+        # not supported anymore. Therefore, we have to create a checkpoint first.
+        checkpoint_name = ckan_context.build_valiation_checkpoint_name(self.validation_config.validation_name)
+        suite_name = self.validation_config.suite_name
+        _ = hook.add_or_update_checkpoint(
+            checkpoint_name=checkpoint_name,
+            suite_name=suite_name
+        )
 
-    def __init__(self, ckan_name: str, **kwargs):
-        super().__init__(ckan_name=ckan_name, **kwargs)
+        run_name = f'DAG {context.get("dag").safe_dag_id}, VALIDATION {self.validation_config.validation_name}'
+        checkpoint_result = ge_context.run_checkpoint(
+            checkpoint_name=checkpoint_name,
+            expectation_suite_name=suite_name,
+            batch_request=batch_request,
+            run_name=run_name,
+        )
 
-    def execute(self, context):
-        ckan_context = CkanContext.generate_context_from_airflow_execute(self, context, import_from_redis=True)
-        hook = GreatExpectationsHook(ckan_context.airflow_connection_id)
-        ge_context = hook.get_context()
-
-        checkpoint_success = []  # Needed to store status of all checkpoints
-        for checkpoint_name, configs in ckan_context.checkpoint_configs.items():
-
-            # TODO: datasource must be generated again, because not persistet to GE store (workaround).
-            datasource_config = ckan_context.checkpoint_configs[checkpoint_name]['batch_request']['datasource_config']
-            _ = ge_context.add_datasource(**datasource_config, save_changes=True)
-
-            # TODO: batch_request must be generated again, because not persistet to GE store (workaround).
-            batch_request = BatchRequest(**configs['batch_request']['batch_request_config'])
-            checkpoint_config = configs['checkpoint_config']
-
-            # TODO: Does not use hook.py -> run_checkpont. Is this right?
-            run_name = f'DAG {context.get("dag").safe_dag_id}'
-            checkpoint_result = ge_context.run_checkpoint(
-                checkpoint_name=checkpoint_config['checkpoint_name'],
-                expectation_suite_name=checkpoint_config['suite_name'],
-                batch_request=batch_request,
-                run_name=run_name,
-            )
-            checkpoint_success.append(checkpoint_result.success)
-
-        if all(checkpoint_success):
-            ckan_context.checkpoint_success = True
-        else:
-            ckan_context.checkpoint_success = False
-
+        # Build data docs (otherwise, expectation suites do not get correctly displayed in data docs)
         ge_context.build_data_docs()
+
+        # Append element to redis with db locking
+        ckan_context.append_checkpoint_success(checkpoint_result.success)

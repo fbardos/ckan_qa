@@ -1,27 +1,33 @@
+import importlib
 import io
-import json
 import logging
-from typing import Generator, Optional, Tuple, Union
+import os
+from typing import Generator, Literal, Tuple, Union
 
 import pandas as pd
 import requests
-from great_expectations.core.batch import RuntimeBatchRequest
+from dotenv import load_dotenv
 from great_expectations.core.expectation_configuration import \
     ExpectationConfiguration
 from great_expectations.data_context import BaseDataContext
+from great_expectations.data_context.data_context.abstract_data_context import \
+    AbstractDataContext
 from great_expectations.data_context.types.base import (
     AnonymizedUsageStatisticsConfig, DataContextConfig, S3StoreBackendDefaults)
 from great_expectations.exceptions import DataContextError
-from markdown import Markdown
-from nio import AsyncClient
-from nio.responses import RoomResolveAliasError
-from ruamel import yaml
 
-from airflow.exceptions import AirflowException
 from airflow.hooks.base import BaseHook
-from ckanqa.connectors import MinioConnector
-from ckanqa.constant import (DEFAULT_S3_CONN_ID, S3_BUCKET_NAME_DATA,
-                             S3_BUCKET_NAME_META)
+from ckanqa.connector import FilesystemBaseConnector, MinioConnector
+
+# According to GE Docs, when using an experimental expectation, an import is needed
+# when Expectation Suite is created AND when checkpoint is defined and run.
+from great_expectations_experimental.expectations.expect_column_values_to_change_between import \
+    ExpectColumnValuesToChangeBetween
+
+
+load_dotenv()
+DEFAULT_S3_CONN_ID = os.environ['CKANQA__CONFIG__S3_CONN_ID']
+S3_BUCKET_NAME_META = os.environ['CKANQA__CONFIG__S3_BUCKET_NAME_META']
 
 
 class CkanInstanceHook(BaseHook):
@@ -41,12 +47,29 @@ class CkanInstanceHook(BaseHook):
     def get_metadata(self, package_name: str):
         ENDPOINT = 'package_show'
         url = self.get_endpoint_url(ENDPOINT)
-        response = requests.get(url, params={'id': package_name})
-        # TODO: Add Error handling for HTTP-Codes != 200
+        try:
+            response = requests.get(url, params={'id': package_name})
+        except requests.exceptions.RequestException as err:
+            raise SystemExit(err)
         return response.text
 
 
-class CkanDataHook(BaseHook):
+class CkanFilesystemHook(BaseHook):
+
+    def __init__(
+        self,
+        connection_id: str = DEFAULT_S3_CONN_ID,
+        connector_class: Literal['MinioConnector', 'SftpConnector'] = 'MinioConnector',
+        **kwargs
+    ):
+        self.connection_id = connection_id
+
+        # Load connector class
+        mod = importlib.import_module('ckanqa.connector')
+        self.connector: FilesystemBaseConnector = getattr(mod, connector_class)(**kwargs)
+
+
+class CkanDataHook(CkanFilesystemHook):
     """Connects to data, e.g. on Minio.
 
     Call structure, per default:
@@ -54,60 +77,60 @@ class CkanDataHook(BaseHook):
         --> calls MinioConnector
             --> calls S3Hook (airflow.providers.amazon)
 
+    Bucket name for S3/Minio gets stored inside connector and should not be part of this
+    generic CkanDataHook class because other connetors can also by served.
+    If MinioConnector is selected as connector, pass bucket_name to via kwargs.
+
     """
-    # TODO: Use this Hook for all kind of operations with data (not only delete)
 
-    def __init__(self, connection_id: str = DEFAULT_S3_CONN_ID):
-        self.connection_id = connection_id
-        self.connector = MinioConnector(connection_id)
-        self.bucket = S3_BUCKET_NAME_DATA
+    def _build_file_path(self, ckan_name: str, iso_8601_basic: str, filename: str | None = None) -> str:
+        return '/'.join(filter(None, [ckan_name, iso_8601_basic, filename]))
 
-    def list_files(self, path: str):
-        return self.connector.list_files_paths(path)
+    def write_buffer_to_target(self, ckan_name: str, iso_8601_basic: str, filename: str, buffer: io.BytesIO):
+        """ISO 8601 BASIC is needed as directory name."""
+        key = self._build_file_path(ckan_name, iso_8601_basic, filename)
+        self.connector.write_to_target(key, buffer)
+
+    def load_from_directory(self, ckan_name: str, iso_8601_basic: str) -> Generator[Tuple[str, io.BytesIO], None, None]:
+        """Loads all files files from directory."""
+        prefix = self._build_file_path(ckan_name, iso_8601_basic)
+        for key, buffer in self.connector.load_directory_from_target(prefix):
+            yield key, buffer
 
     def write_from_request(self, ckan_name: str, iso_8601_basic: str, filename: str, response: requests.Response):
-        self.connector.write_to_source_request(ckan_name, iso_8601_basic, filename, response)
+        prefix = self._build_file_path(ckan_name, iso_8601_basic, filename)
+        self.connector.write_to_target_request_content(prefix, response)
 
     def write_from_buffer(self, ckan_name: str, iso_8601_basic: str, filename: str, buffer: io.BytesIO):
-        self.connector.write_to_source_buffer(ckan_name, iso_8601_basic, filename, buffer)
+        prefix = self._build_file_path(ckan_name, iso_8601_basic, filename)
+        self.connector.write_to_target(prefix, buffer)
 
-    def load_dataframe_from_filetype(
-        self, ckan_name: str, iso_8601_basic: str, filetype: str = '.csv'
+    def load_dataframes_from_ckan(
+        self, ckan_name: str, iso_8601_basic: str, filetype: Literal['.csv', '.parquet'] = '.csv'
     ) -> Generator[Tuple[str, pd.DataFrame], None, None]:
-        """
-
-        Returns:
-            Iterator
-
-        """
-        for file, df in self.connector.load_dataframe_from_filetype(ckan_name, iso_8601_basic, filetype):
-            yield file, df
+        """ Returns generator """
+        prefix = self._build_file_path(ckan_name, iso_8601_basic)
+        for filepath in self.connector.list_path_objects(prefix):
+            if os.path.splitext(filepath)[1] == filetype:  # match file ending
+                yield filepath, self.connector.load_dataframe_from_target(filepath)
+            else:
+                continue
 
     def delete_files(self, keys: Union[str, list]):
-        self.connector.delete_from_source(keys=keys)
+        if isinstance(keys, str):
+            keys = [keys]
+        for key in keys:
+            self.connector.delete_from_target(key)
 
 
-class GreatExpectationsHook(BaseHook):
+class GreatExpectationsHook(CkanFilesystemHook):
     """Connects to GE on Minio."""
-    # TODO: Should return GE context from S3-stored GE
     DATA_DOCS_SITE_NAME = 's3_site'
 
-    def __init__(self, connection_id: str = DEFAULT_S3_CONN_ID):
-        self.connection_id = connection_id
-        self.connector = MinioConnector(connection_id)
-        self.bucket = S3_BUCKET_NAME_META
+    def get_base_data_context(self) -> AbstractDataContext:
 
-    def get_context(self):
-
-        # Load credentails from BaseHook
-        # TODO: Better would be to use as custom S3 Hook instead.
-        credentials = BaseHook.get_connection(conn_id=self.connection_id)
-
-        boto3_options = {
-            'endpoint_url': json.loads(credentials.get_extra())['endpoint_url'],
-            'aws_access_key_id': credentials.login,
-            'aws_secret_access_key': credentials._password,
-        }
+        # Only supported for MinioConnector
+        assert isinstance(self.connector, MinioConnector)
 
         # Build GreatExpectations data context
         config_data_docs_sites = {
@@ -117,7 +140,7 @@ class GreatExpectationsHook(BaseHook):
                     "class_name": "TupleS3StoreBackend",
                     "bucket": S3_BUCKET_NAME_META,
                     "prefix": "data_docs",
-                    "boto3_options": boto3_options,
+                    "boto3_options": self.connector.boto3_options,
                 },
             },
         }
@@ -130,15 +153,16 @@ class GreatExpectationsHook(BaseHook):
         )
 
         # Rewrite store_backend_defaults config
-        for store in data_context_config['stores'].values():
+        for store in data_context_config.stores.values():
             if store.get('store_backend', {}).get('class_name') == 'TupleS3StoreBackend':
-                store['store_backend']['boto3_options'] = boto3_options
+                store['store_backend']['boto3_options'] = self.connector.boto3_options
 
         # Return GE context
         return BaseDataContext(project_config=data_context_config)
 
     def get_suite(self, suite_name: str):
-        context = self.get_context()
+
+        context = self.get_base_data_context()
         try:
             suite = context.get_expectation_suite(expectation_suite_name=suite_name)
             logging.info(
@@ -153,70 +177,46 @@ class GreatExpectationsHook(BaseHook):
 
         return suite
 
-    def add_pandas_datasource(self, name: str):
-        datasource_config = {
-            'name': name,
-            'class_name': 'Datasource',
-            'module_name': 'great_expectations.datasource',
-            'execution_engine': {
-                'module_name': 'great_expectations.execution_engine',
-                'class_name': 'PandasExecutionEngine',
-            },
-            'data_connectors': {
-                'default_runtime_data_connector_name': {
-                    'class_name': 'RuntimeDataConnector',
-                    'module_name': 'great_expectations.datasource.data_connector',
-                    'batch_identifiers': ['batch_id'],
-                },
-            },
-        }
-        context = self.get_context()
-        context.test_yaml_config(yaml.dump(datasource_config))
-        datasource = context.add_datasource(**datasource_config)
-        return datasource
+    """
+    Currently not needed, but when reenabled, it should be inserted as separate Airflow Operator.
 
-    def add_pandas_batch_request(self, datasource_name: str, data_asset_name: str, df: pd.DataFrame):
-        batch_request = RuntimeBatchRequest(
-            datasource_name=datasource_name,
-            data_connector_name="default_runtime_data_connector_name",  # TODO: Is this to be renamed?
-            data_asset_name=data_asset_name,
-            batch_identifiers={"batch_id": "default_identifier"},
-            runtime_parameters={"batch_data": df},
-        )
-        return batch_request
+    Currently, all the datasource_config gets built inside GeExecuteCheckpointOperator.
+    Maybe, there is a simpler way, without defining a Checkpoint before?
+    """
+    # def add_pandas_datasource(self, name: str):
+    #     datasource_config = {
+    #         'name': name,
+    #         'class_name': 'Datasource',
+    #         'module_name': 'great_expectations.datasource',
+    #         'execution_engine': {
+    #             'module_name': 'great_expectations.execution_engine',
+    #             'class_name': 'PandasExecutionEngine',
+    #         },
+    #         'data_connectors': {
+    #             'default_runtime_data_connector_name': {
+    #                 'class_name': 'RuntimeDataConnector',
+    #                 'module_name': 'great_expectations.datasource.data_connector',
+    #                 'batch_identifiers': ['batch_id'],
+    #             },
+    #         },
+    #     }
+    #     context = self.get_base_data_context()
+    #     context.test_yaml_config(yaml.dump(datasource_config))
+    #     datasource = context.add_datasource(**datasource_config)
+    #     return datasource
 
-    def add_expectation(self, suite_name: str, expectation_type: str, meta: Optional[dict] = None, **kwargs):
+    def add_expectation(self, suite_name: str, expectation_config: ExpectationConfiguration):
         """
-
-        Args:
-            suite_name: Name of the corresponding suite.
-            expectation_type: Name of expectation type being added,
-                e.g expect_table_columns_to_match_ordered_list
-            meta: Meta information, like:
-                meta={
-                   "notes": {
-                      "format": "markdown",
-                      "content": "Some clever comment about this expectation. **Markdown** `Supported`"
-                   }
-                }
-
-
-
         """
-        context = self.get_context()
+        context = self.get_base_data_context()
         suite = self.get_suite(suite_name)
-        expectation_configuration = ExpectationConfiguration(
-            expectation_type=expectation_type,
-            kwargs=kwargs,
-            meta=meta,
-        )
-        expectation = suite.add_expectation(expectation_configuration=expectation_configuration)
+        expectation = suite.add_expectation(expectation_configuration=expectation_config)
         context.save_expectation_suite(expectation_suite=suite, expectation_suite_name=suite_name)
         return expectation
 
-    def add_checkpoint(self, checkpoint_name: str, suite_name: str):
-        context = self.get_context()
-        checkpoint = context.add_checkpoint(
+    def add_or_update_checkpoint(self, checkpoint_name: str, suite_name: str):
+        context = self.get_base_data_context()
+        checkpoint = context.add_or_update_checkpoint(
             name=checkpoint_name,
             config_version=1,
             class_name='SimpleCheckpoint',
@@ -224,75 +224,3 @@ class GreatExpectationsHook(BaseHook):
             site_names=[self.DATA_DOCS_SITE_NAME],  # Not needed... per default will update all data_docs_sites
         )
         return checkpoint
-
-    # Currently not needed?
-    # def run_checkpoint(
-        # self,
-        # checkpoint_name: str,
-        # suite_name: str,
-        # datasource_name: str,
-        # data_asset_name:str,
-        # df: pd.DataFrame  # TODO: not always needed with injected dataframe
-    # ):
-        # context = self.get_context()
-        # result = context.run_checkpoint(
-            # checkpoint_name=checkpoint_name,
-            # expectation_suite_name=suite_name,
-            # batch_request=self.add_pandas_batch_request(datasource_name, data_asset_name, df),
-        # )
-        # return result
-
-
-class MatrixHook(BaseHook):
-
-    def __init__(self, conn_id: str):
-        super().__init__()
-        self.conn = self.get_connection(conn_id)
-        if isinstance(self.conn.host, str) and isinstance(self.conn.login, str):
-            pass
-        else:
-            raise ValueError('Stored host and login must be set.')
-        self.client = AsyncClient(self.conn.host, self.conn.login)
-
-    async def _login(self):
-        """Returns token..."""
-        r = await self.client.login(self.conn.password)
-        logging.info('Logged in to matrix homeserver.')
-        return r
-
-    async def _close(self):
-        r = await self.client.close()
-        logging.info('Logged out of matrix homeserver')
-        return r
-
-    async def resolve_alias(self, alias: str):
-        await self._login()
-        try:
-            r = await self.client.room_resolve_alias(alias)
-            if isinstance(r, RoomResolveAliasError):  # When room does not exist, create one
-                raise AirflowException(f'Room alias {alias} could not be resolved.')
-        finally:
-            await self._close()
-        return r.room_id
-
-    async def send_markdown_message(self, room_id: str, message: str):
-        """Sends message to matrix server.
-
-        This method needs error handling, e.g. when sent message is too big.
-
-        """
-        _ = await self._login()
-        try:
-            msg_html = Markdown().convert('<pre><code>' + message + '</code></pre>')
-            _ = await self.client.room_send(
-                room_id=room_id,
-                message_type='m.room.message',
-                content={
-                    "msgtype": "m.text",
-                    "format": "org.matrix.custom.html",
-                    "body": message,
-                    "formatted_body": msg_html,
-                }
-            )
-        finally:
-            _ = await self._close()
