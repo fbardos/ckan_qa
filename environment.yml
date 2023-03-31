@@ -1,0 +1,22 @@
+name: ckanqa
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10.9
+  - pandas
+  - great-expectations
+  - psycopg2
+  - pymongo
+  - ipdb
+  - airflow
+  - apache-airflow-providers-redis
+  - apache-airflow-providers-amazon
+  - apache-airflow-providers-mongo
+  - redis-py
+  - boto3
+  - pyarrow
+  - fastparquet
+  - ruamel_yaml
+  - python-dotenv
+  - neovim
+  - isort
