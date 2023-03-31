@@ -1,3 +1,6 @@
+# Create multiple workers with: docker-compose up --scale spark-worker=3
+version: '2'
+
 # Set logging system wide
 x-logging: &default-logging
   options:
@@ -5,8 +8,20 @@ x-logging: &default-logging
     max-file: '3'
 
 services:
-  algo_redis:
-    container_name: ckan_redis
+  s3:
+    image: minio/minio
+    ports:
+      - "9000:9000"
+      - "9090:9090"
+    volumes:
+      - vol-s3:/data
+    environment:
+      MINIO_ROOT_USER: $(CKANQA__S3__USER)
+      MINIO_ROOT_PASSWORD: $(CKANQA_S3__PASSWORD)
+    logging: *default-logging
+    command: server /data --console-address ":9090"
+  ckanqa_redis:
+    container_name: ckanqa_redis
     image: redis
     restart: unless-stopped
     logging: *default-logging
@@ -16,3 +31,7 @@ services:
       - 41414:6379
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
+
+volumes:
+  vol-s3:
+    external: false

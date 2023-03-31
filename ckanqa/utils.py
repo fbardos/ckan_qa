@@ -12,5 +12,3 @@ def generate_date_range(
     delta_s = (end - start).total_seconds()
     hops = math.floor(delta_s / interval_min / 60) + 1
     return [start + dt.timedelta(minutes=interval_min * i) for i in range(hops)]
-
-
