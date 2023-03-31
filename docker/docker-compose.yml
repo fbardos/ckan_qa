@@ -16,8 +16,8 @@ services:
     volumes:
       - vol-s3:/data
     environment:
-      MINIO_ROOT_USER: $(CKANQA__S3__USER)
-      MINIO_ROOT_PASSWORD: $(CKANQA_S3__PASSWORD)
+      MINIO_ROOT_USER: ${CKANQA__S3__USER}
+      MINIO_ROOT_PASSWORD: ${CKANQA__S3__PASSWORD}
     logging: *default-logging
     command: server /data --console-address ":9090"
   ckanqa_redis:

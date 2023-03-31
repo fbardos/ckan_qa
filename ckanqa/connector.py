@@ -1,19 +1,15 @@
 import io
 import json
-import logging
 import os
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Generator, List, Tuple, TypeVar, Union
 
 import boto3
 import pandas as pd
-import redis
 import requests
 from dotenv import load_dotenv
 
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
-from airflow.providers.redis.hooks.redis import RedisHook
 
 BaseAwsConnection = TypeVar('BaseAwsConnection', bound=Union[boto3.client, boto3.resource])
 
@@ -61,7 +57,7 @@ class FilesystemBaseConnector(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def delete_from_target(self, filepath:str, filename: str | None = None) -> None:
+    def delete_from_target(self, filepath: str, filename: str | None = None) -> None:
         """cruD"""
         raise NotImplementedError
 
@@ -91,7 +87,7 @@ class MinioConnector(FilesystemBaseConnector):
         return '/'.join(filter(None, [filepath, filename]))
 
     def _load_from_target_by_key(self, key: str) -> io.BytesIO:
-        response = self.hook.read_key(key, bucket_name=self.bucket_name) # loads as string
+        response = self.hook.read_key(key, bucket_name=self.bucket_name)  # loads as string
         buffer = io.BytesIO(bytes(response, 'utf-8'))
         return buffer
 
