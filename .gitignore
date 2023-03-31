@@ -4,6 +4,13 @@
 # Exclude GreatExpectations subfolder
 great_expectations/
 
+# Exclude Airflow specific files
+airflow/airflow.cfg
+airflow/airflow.db
+airflow/logs/
+airflow/unittests.cfg
+airflow/webserver_config.py
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
