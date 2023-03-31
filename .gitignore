@@ -1,6 +1,9 @@
 # vim-specific
 .vim
 
+# Exclude GreatExpectations subfolder
+great_expectations/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
