@@ -1,0 +1,8 @@
+{
+    "CKANQA__CONFIG__STRFTIME_FORMAT": "%Y%m%dT%H%M%S.%fZ",
+    "CKANQA__CONFIG__REDIS_CONN_ID": "redis_cache",
+    "CKANQA__CONFIG__REDIS_DEFAULT_TTL": 300,
+    "CKANQA__CONFIG__S3_CONN_ID": "minio_storage",
+    "CKANQA__CONFIG__S3_BUCKET_NAME_DATA": "ckanqa",
+    "CKANQA__CONFIG__S3_BUCKET_NAME_META": "great-expectations-meta",
+}
