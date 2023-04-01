@@ -67,7 +67,7 @@ class CkanContext:
         self.ckan_name = ckan_name
         self._dag_runtime = dag_runtime  # Can be set after init
 
-        self.REDIS_CONN_ID = Variable.get('CKANQA__REDIS_CONN_ID')
+        self.redis_conn_id = Variable.get('CKANQA__REDIS_CONN_ID')
 
         if import_from_redis:
             self._check_key_redis()
@@ -242,7 +242,7 @@ class CkanContext:
         ]))
 
     def _redis_get(self, property: str) -> str:
-        hook = RedisHook(self.REDIS_CONN_ID)
+        hook = RedisHook(self.redis_conn_id)
         with hook.get_conn() as conn:
             key = self._build_key(property)
             if not conn.exists(key):
@@ -257,7 +257,7 @@ class CkanContext:
         """When ttl = None, then no expiration."""
         if ttl is None:
             ttl = Variable.get('CKANQA__REDIS_DEFAULT_TTL')
-        hook = RedisHook(self.REDIS_CONN_ID)
+        hook = RedisHook(self.redis_conn_id)
         with hook.get_conn() as conn:
             key = self._build_key(property)
             if conn.exists(key):
@@ -269,7 +269,7 @@ class CkanContext:
 
     def _redis_append_with_lock(self, property: str, value: Any) -> None:
         """Append one element to a list, with db lock."""
-        hook = RedisHook(self.REDIS_CONN_ID)
+        hook = RedisHook(self.redis_conn_id)
         with hook.get_conn() as conn:
             with conn.lock('lock'):
                 response = json.loads(self._redis_get(property))
@@ -278,7 +278,7 @@ class CkanContext:
                 self._redis_set(property, modified_response)
 
     def _redis_delete(self, property: str) -> None:
-        hook = RedisHook(self.REDIS_CONN_ID)
+        hook = RedisHook(self.redis_conn_id)
         key = self._build_key(property)
         with hook.get_conn() as conn:
             if not conn.exists(key):
