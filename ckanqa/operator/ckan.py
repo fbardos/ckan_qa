@@ -5,15 +5,12 @@ import re
 from typing import Any, List, Optional, Tuple, Union
 
 import requests
-from dotenv import load_dotenv
 
 from airflow.exceptions import AirflowSkipException
+from airflow.models import Variable
 from ckanqa.context import CkanContext
 from ckanqa.hook import CkanDataHook
 from ckanqa.operator.base import CkanBaseOperator
-
-load_dotenv()
-S3_BUCKET_NAME_DATA = os.environ['CKANQA__CONFIG__S3_BUCKET_NAME_DATA']
 
 
 class CkanExtractOperator(CkanBaseOperator):
@@ -78,9 +75,10 @@ class CkanExtractOperator(CkanBaseOperator):
 
         # Download all resources and store them with hook
         for url in urls_filtered:
+            bucket_name = Variable.get('CKANQA__S3_BUCKET_NAME_DATA')
             response = requests.get(url)
             filename = re.findall(r'([-a-zA-Z0-9_]+\.[a-zA-Z0-9]+)$', url)[0]
-            hook = CkanDataHook(ckan_context.airflow_connection_id, bucket_name=S3_BUCKET_NAME_DATA)
+            hook = CkanDataHook(ckan_context.airflow_connection_id, bucket_name=bucket_name)
             hook.write_from_request(self.ckan_name, dag_run_timestamp, filename, response)
 
 
@@ -124,12 +122,13 @@ class CkanParquetOperator(CkanBaseOperator):
 
     def execute(self, context):
         ckan_context = CkanContext.generate_context_from_airflow_execute(self, context, import_from_redis=True)
+        bucket_name = Variable.get('CKANQA__S3_BUCKET_NAME_DATA')
 
         # Extract dag run timestamp from context
         dag_run_timestamp = ckan_context.dag_runtime_iso_8601_basic
 
         # Iterate over files
-        hook = CkanDataHook(ckan_context.airflow_connection_id, bucket_name=S3_BUCKET_NAME_DATA)
+        hook = CkanDataHook(ckan_context.airflow_connection_id, bucket_name=bucket_name)
         files_processed = 0
         for path, df in hook.load_dataframes_from_ckan(self.ckan_name, dag_run_timestamp):
 
@@ -196,9 +195,10 @@ class CkanDeleteOperator(CkanBaseOperator):
 
         """
         ckan_context = CkanContext.generate_context_from_airflow_execute(self, context, import_from_redis=True)
+        bucket_name = Variable.get('CKANQA__S3_BUCKET_NAME_DATA')
 
         # First, list files, then delete them after filter...
-        hook = CkanDataHook(ckan_context.airflow_connection_id, bucket_name=S3_BUCKET_NAME_DATA)
+        hook = CkanDataHook(ckan_context.airflow_connection_id, bucket_name=bucket_name)
 
         # Step 1: Retrieve all available files.
         list_files = hook.connector.list_path_objects(self.get_s3_prefix(context))

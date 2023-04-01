@@ -7,14 +7,11 @@ from typing import Generator, List, Tuple, TypeVar, Union
 import boto3
 import pandas as pd
 import requests
-from dotenv import load_dotenv
 
+from airflow.models import Variable
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 
 BaseAwsConnection = TypeVar('BaseAwsConnection', bound=Union[boto3.client, boto3.resource])
-
-load_dotenv()
-DEFAULT_S3_CONN_ID = os.environ['CKANQA__CONFIG__S3_CONN_ID']
 
 
 class FilesystemBaseConnector(ABC):
@@ -65,7 +62,10 @@ class FilesystemBaseConnector(ABC):
 class MinioConnector(FilesystemBaseConnector):
     """Connector for Minoio (S3 object storage)"""
 
-    def __init__(self, bucket_name: str, connection_id: str = DEFAULT_S3_CONN_ID):
+    def __init__(self, bucket_name: str, connection_id: str | None = None):
+        if connection_id is None:
+            connection_id = Variable.get('CKANQA__S3_CONN_ID')
+            assert connection_id is not None
         super().__init__(connection_id)
         self.hook = S3Hook(self.connection_id)
         self.bucket_name = bucket_name  # Name of the bucket is only needed inside this connector

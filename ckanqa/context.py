@@ -7,18 +7,11 @@ import logging
 import os
 from typing import Any, List, Optional
 
-from dotenv import load_dotenv
-
 from airflow.hooks.base import BaseHook
+from airflow.models import Variable
 from airflow.providers.redis.hooks.redis import RedisHook
 from ckanqa.hook import CkanInstanceHook
 from ckanqa.operator.base import CkanBaseOperator
-
-load_dotenv()
-DEFAULT_S3_CONN_ID = os.environ['CKANQA__CONFIG__S3_CONN_ID']
-REDIS_DEFAULT_TTL = os.environ['CKANQA__CONFIG__REDIS_DEFAULT_TTL']
-ISO8601_BASIC_FORMAT = os.environ['CKANQA__CONFIG__STRFTIME_FORMAT']
-S3_BUCKET_NAME_DATA = os.environ['CKANQA__CONFIG__S3_BUCKET_NAME_DATA']
 
 
 class CkanContext:
@@ -66,24 +59,24 @@ class CkanContext:
         import_from_redis: bool = False,
         ckan_api_base_url: str = 'https://ckan.opendata.swiss',
         connector_class: str = 'MinioConnector',
-        airflow_connection_id: str = DEFAULT_S3_CONN_ID,
-        data_bucket_name: str = S3_BUCKET_NAME_DATA,
+        airflow_connection_id: str | None = None,
+        data_bucket_name: str | None = None,
     ):
 
         # General, part of REDIS keys
         self.ckan_name = ckan_name
         self._dag_runtime = dag_runtime  # Can be set after init
 
-        self.REDIS_CONN_ID = os.environ['CKANQA__CONFIG__REDIS_CONN_ID']
+        self.REDIS_CONN_ID = Variable.get('CKANQA__REDIS_CONN_ID')
 
         if import_from_redis:
             self._check_key_redis()
         else:  # Set/Overwrite on redis via @property.setter
             self.ckan_api_base_url = ckan_api_base_url
-            self.data_bucket_name = data_bucket_name
             self.connector_class = connector_class  # Currently only MinioConnector supported
-            self.airflow_connection_id = airflow_connection_id
             self.checkpoint_success = []
+            self.airflow_connection_id = v if (v := airflow_connection_id) else Variable.get('CKANQA__S3_CONN_ID')
+            self.data_bucket_name = v if (v := data_bucket_name) else Variable.get('CKANQA__S3_BUCKET_NAME_DATA')
 
     @classmethod
     def generate_context_from_airflow_execute(
@@ -100,7 +93,8 @@ class CkanContext:
 
     @property
     def dag_runtime_iso_8601_basic(self):
-        return self.dag_runtime.strftime(ISO8601_BASIC_FORMAT)
+        format = Variable.get('CKANQA__STRFTIME_FORMAT')
+        return self.dag_runtime.strftime(format)
 
     @property
     def dag_runtime(self) -> dt.datetime:
@@ -248,7 +242,6 @@ class CkanContext:
         ]))
 
     def _redis_get(self, property: str) -> str:
-        assert self.REDIS_CONN_ID
         hook = RedisHook(self.REDIS_CONN_ID)
         with hook.get_conn() as conn:
             key = self._build_key(property)
@@ -260,9 +253,10 @@ class CkanContext:
             logging.debug(f'REDIS READ: key {key}')
             return response.decode('utf-8')
 
-    def _redis_set(self, property: str, value: str, ttl: Optional[int] = REDIS_DEFAULT_TTL) -> None:
+    def _redis_set(self, property: str, value: str, ttl: int | None = None) -> None:
         """When ttl = None, then no expiration."""
-        assert self.REDIS_CONN_ID
+        if ttl is None:
+            ttl = Variable.get('CKANQA__REDIS_DEFAULT_TTL')
         hook = RedisHook(self.REDIS_CONN_ID)
         with hook.get_conn() as conn:
             key = self._build_key(property)
@@ -275,7 +269,6 @@ class CkanContext:
 
     def _redis_append_with_lock(self, property: str, value: Any) -> None:
         """Append one element to a list, with db lock."""
-        assert self.REDIS_CONN_ID
         hook = RedisHook(self.REDIS_CONN_ID)
         with hook.get_conn() as conn:
             with conn.lock('lock'):
@@ -285,7 +278,6 @@ class CkanContext:
                 self._redis_set(property, modified_response)
 
     def _redis_delete(self, property: str) -> None:
-        assert self.REDIS_CONN_ID
         hook = RedisHook(self.REDIS_CONN_ID)
         key = self._build_key(property)
         with hook.get_conn() as conn:

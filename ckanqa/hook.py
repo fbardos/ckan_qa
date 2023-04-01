@@ -6,7 +6,9 @@ from typing import Generator, Literal, Tuple, Union
 
 import pandas as pd
 import requests
-from dotenv import load_dotenv
+
+from airflow.hooks.base import BaseHook
+from airflow.models import Variable
 from great_expectations.core.expectation_configuration import \
     ExpectationConfiguration
 from great_expectations.data_context import BaseDataContext
@@ -16,18 +18,12 @@ from great_expectations.data_context.types.base import (
     AnonymizedUsageStatisticsConfig, DataContextConfig, S3StoreBackendDefaults)
 from great_expectations.exceptions import DataContextError
 
-from airflow.hooks.base import BaseHook
 from ckanqa.connector import FilesystemBaseConnector, MinioConnector
 
 # According to GE Docs, when using an experimental expectation, an import is needed
 # when Expectation Suite is created AND when checkpoint is defined and run.
 from great_expectations_experimental.expectations.expect_column_values_to_change_between import \
     ExpectColumnValuesToChangeBetween
-
-
-load_dotenv()
-DEFAULT_S3_CONN_ID = os.environ['CKANQA__CONFIG__S3_CONN_ID']
-S3_BUCKET_NAME_META = os.environ['CKANQA__CONFIG__S3_BUCKET_NAME_META']
 
 
 class CkanInstanceHook(BaseHook):
@@ -58,11 +54,11 @@ class CkanFilesystemHook(BaseHook):
 
     def __init__(
         self,
-        connection_id: str = DEFAULT_S3_CONN_ID,
+        connection_id: str | None = None,
         connector_class: Literal['MinioConnector', 'SftpConnector'] = 'MinioConnector',
         **kwargs
     ):
-        self.connection_id = connection_id
+        self.connection_id = v if (v := connection_id) else Variable.get('CKANQA__S3_CONN_ID')
 
         # Load connector class
         mod = importlib.import_module('ckanqa.connector')
@@ -128,6 +124,7 @@ class GreatExpectationsHook(CkanFilesystemHook):
     DATA_DOCS_SITE_NAME = 's3_site'
 
     def get_base_data_context(self) -> AbstractDataContext:
+        bucket_name_meta = Variable.get('CKANQA__S3_BUCKET_NAME_META')
 
         # Only supported for MinioConnector
         assert isinstance(self.connector, MinioConnector)
@@ -138,7 +135,7 @@ class GreatExpectationsHook(CkanFilesystemHook):
                 "class_name": "SiteBuilder",
                 "store_backend": {
                     "class_name": "TupleS3StoreBackend",
-                    "bucket": S3_BUCKET_NAME_META,
+                    "bucket": bucket_name_meta,
                     "prefix": "data_docs",
                     "boto3_options": self.connector.boto3_options,
                 },
@@ -146,7 +143,7 @@ class GreatExpectationsHook(CkanFilesystemHook):
         }
         data_context_config = DataContextConfig(
             store_backend_defaults=S3StoreBackendDefaults(
-                default_bucket_name=S3_BUCKET_NAME_META
+                default_bucket_name=bucket_name_meta,
             ),
             data_docs_sites=config_data_docs_sites,
             anonymous_usage_statistics=AnonymizedUsageStatisticsConfig(enabled=False)

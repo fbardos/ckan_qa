@@ -6,7 +6,7 @@ import os
 from collections.abc import Sequence
 from typing import Optional, Sequence
 
-from dotenv import load_dotenv
+from airflow.models import Variable
 from great_expectations.core.batch import BatchMarkers, BatchRequest
 from great_expectations.core.expectation_configuration import \
     ExpectationConfiguration
@@ -18,10 +18,6 @@ from ckanqa.hook import GreatExpectationsHook
 from ckanqa.operator.ckan import CkanBaseOperator
 
 
-load_dotenv()
-S3_BUCKET_NAME_META = os.environ['CKANQA__CONFIG__S3_BUCKET_NAME_META']
-
-
 class CkanBaseOperatorMeta(CkanBaseOperator):
 
     def __init__(self, ckan_name: str, **kwargs):
@@ -29,7 +25,7 @@ class CkanBaseOperatorMeta(CkanBaseOperator):
         if v := kwargs.get('bucket_name', None):
             self.bucket_name = v
         else:
-            self.bucket_name = S3_BUCKET_NAME_META
+            self.bucket_name = Variable.get('CKANQA__S3_BUCKET_NAME_META')
 
     def build_ge_hook(self, ckan_context: CkanContext) -> GreatExpectationsHook:
         return GreatExpectationsHook(ckan_context.airflow_connection_id, bucket_name=self.bucket_name)

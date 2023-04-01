@@ -1,12 +1,7 @@
 import datetime as dt
-import os
 
-from dotenv import load_dotenv
-
+from airflow.models import Variable
 from airflow.models.baseoperator import BaseOperator
-
-load_dotenv()
-ISO8601_BASIC_FORMAT = os.environ['CKANQA__CONFIG__STRFTIME_FORMAT']
 
 
 class CkanBaseOperator(BaseOperator):
@@ -19,7 +14,8 @@ class CkanBaseOperator(BaseOperator):
         return airflow_context.get('dag_run').execution_date
 
     def get_dag_runtime_iso_8601_basic(self, airflow_context) -> str:
-        return self.get_dag_runtime(airflow_context).strftime(ISO8601_BASIC_FORMAT)
+        format = Variable.get('CKANQA__STRFTIME_FORMAT')
+        return self.get_dag_runtime(airflow_context).strftime(format)
 
     def get_s3_prefix(self, airflow_context) -> str:
         dag_runtime = self.get_dag_runtime_iso_8601_basic(airflow_context)
