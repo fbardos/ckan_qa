@@ -1,4 +1,5 @@
-# Create multiple workers with: docker-compose up --scale spark-worker=3
+# Project name (COMPOSE_PROJECT_NAME) is set in .env file,
+# to prevent directory name to be used in containers and volumes.
 version: '2'
 
 # Set logging system wide
@@ -20,8 +21,7 @@ services:
       MINIO_ROOT_PASSWORD: changeme123
     logging: *default-logging
     command: server /data --console-address ":9090"
-  ckanqa_redis:
-    container_name: ckanqa_redis
+  redis:
     image: redis
     restart: unless-stopped
     logging: *default-logging
