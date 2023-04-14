@@ -272,5 +272,6 @@ class PublishDataDocsOperator(CkanBaseOperator):
                 buffer = io.BytesIO()
                 path, filename = obj.key.rsplit('/', 1)
                 bucket.download_fileobj(obj.key, buffer)
+                buffer.seek(0)
                 mkdir_p(sftp_client, destination_path + path)
                 sftp_client.putfo(buffer, filename)
