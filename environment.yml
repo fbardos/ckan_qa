@@ -12,6 +12,7 @@ dependencies:
   - apache-airflow-providers-redis
   - apache-airflow-providers-amazon
   - apache-airflow-providers-mongo
+  - apache-airflow-providers-sftp
   - redis-py
   - boto3
   - pyarrow

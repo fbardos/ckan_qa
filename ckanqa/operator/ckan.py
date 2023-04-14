@@ -5,12 +5,15 @@ import re
 from typing import Any, List, Optional, Tuple, Union
 
 import requests
-
 from airflow.exceptions import AirflowSkipException
 from airflow.models import Variable
+from airflow.providers.sftp.hooks.sftp import SFTPHook
+
+from ckanqa.connector import MinioConnector
 from ckanqa.context import CkanContext
-from ckanqa.hook import CkanDataHook
+from ckanqa.hook import CkanDataHook, GreatExpectationsHook
 from ckanqa.operator.base import CkanBaseOperator
+from ckanqa.utils import mkdir_p
 
 
 class CkanExtractOperator(CkanBaseOperator):
@@ -234,3 +237,40 @@ class CkanDeleteContextOperator(CkanBaseOperator):
     def execute(self, context):
         ckan_context = CkanContext.generate_context_from_airflow_execute(self, context, import_from_redis=True)
         ckan_context.delete_context_redis()
+
+
+class PublishDataDocsOperator(CkanBaseOperator):
+
+    def __init__(self, ckan_name: str, **kwargs):
+        super().__init__(ckan_name=ckan_name, **kwargs)
+
+    def execute(self, context):
+
+        # Load Airflow variables
+        connection_id = Variable.get('CKANQA__S3_CONN_ID')
+        bucket_name = Variable.get('CKANQA__S3_BUCKET_NAME_META')
+        destination_path = Variable.get('CKANQA__DATA_DOCS_PATH')
+        sftp_connection_id = Variable.get('CKANQA__SFTP_CONN_ID')
+
+        # Load files from S3
+        s3_hook = GreatExpectationsHook(connection_id=connection_id, bucket_name=bucket_name)
+
+        # Iterate over all files
+        sftp_hook = SFTPHook(sftp_connection_id)
+        with sftp_hook.get_conn() as sftp_client:
+
+            # Currently, cannot use S3Hook method to retrieve file objects. Instead, use
+            # s3_hook.connector.hook.get_conn() to get botocore.client.S3.
+            # Reason:
+            #   Inside /site-packages/airflow/providers/amazon/aws/hooks/s3.py
+            #   --> Content gets decoded with UTF-8. This does not work for e.g. binary files.
+            #       For example, 'data_docs/static/fonts/HKGrotesk/HKGrotesk-Bold.otf' is a binary file.
+            # As a workaround, we use the boto.s3.Client itself.
+            assert isinstance(s3_hook.connector, MinioConnector)
+            bucket = s3_hook.connector.hook.get_bucket(bucket_name)
+            for obj in bucket.objects.filter(Prefix='data_docs'):
+                buffer = io.BytesIO()
+                path, filename = obj.key.rsplit('/', 1)
+                bucket.download_fileobj(obj.key, buffer)
+                mkdir_p(sftp_client, destination_path + path)
+                sftp_client.putfo(buffer, filename)
