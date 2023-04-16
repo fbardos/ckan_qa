@@ -132,12 +132,13 @@ class GreatExpectationsHook(CkanFilesystemHook):
         # Build GreatExpectations data context
         config_data_docs_sites = {
             self.DATA_DOCS_SITE_NAME: {
-                "class_name": "SiteBuilder",
-                "store_backend": {
-                    "class_name": "TupleS3StoreBackend",
-                    "bucket": bucket_name_meta,
-                    "prefix": "data_docs",
-                    "boto3_options": self.connector.boto3_options,
+                'class_name': 'SiteBuilder',
+                'show_how_to_buttons': False,
+                'store_backend': {
+                    'class_name': 'TupleS3StoreBackend',
+                    'bucket': bucket_name_meta,
+                    'prefix': 'data_docs',
+                    'boto3_options': self.connector.boto3_options,
                 },
             },
         }
