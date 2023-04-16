@@ -8,6 +8,7 @@ import requests
 from airflow.exceptions import AirflowSkipException
 from airflow.models import Variable
 from airflow.providers.sftp.hooks.sftp import SFTPHook
+from airflow.providers.ssh.hooks.ssh import SSHHook
 
 from ckanqa.connector import MinioConnector
 from ckanqa.context import CkanContext
@@ -241,8 +242,16 @@ class CkanDeleteContextOperator(CkanBaseOperator):
 
 class PublishDataDocsOperator(CkanBaseOperator):
 
-    def __init__(self, ckan_name: str, **kwargs):
+    def __init__(
+        self,
+        ckan_name: str,
+        clear_before_copy: bool = True,
+        entry_directory_name: str = 'data_docs',
+        **kwargs
+    ):
         super().__init__(ckan_name=ckan_name, **kwargs)
+        self.clear_before_copy = clear_before_copy
+        self.entry_directory_name = entry_directory_name
 
     def execute(self, context):
 
@@ -259,6 +268,13 @@ class PublishDataDocsOperator(CkanBaseOperator):
         sftp_hook = SFTPHook(sftp_connection_id)
         with sftp_hook.get_conn() as sftp_client:
 
+            # Delete existing files if clear_before_copy == True
+            if self.clear_before_copy:
+                ssh_hook = SSHHook(sftp_connection_id)
+                with ssh_hook.get_conn() as ssh_client:
+                    assert destination_path is not None and self.entry_directory_name is not None
+                    ssh_client.exec_command(f'rm -rf {destination_path}/{self.entry_directory_name}')
+
             # Currently, cannot use S3Hook method to retrieve file objects. Instead, use
             # s3_hook.connector.hook.get_conn() to get botocore.client.S3.
             # Reason:
@@ -268,7 +284,7 @@ class PublishDataDocsOperator(CkanBaseOperator):
             # As a workaround, we use the boto.s3.Client itself.
             assert isinstance(s3_hook.connector, MinioConnector)
             bucket = s3_hook.connector.hook.get_bucket(bucket_name)
-            for obj in bucket.objects.filter(Prefix='data_docs'):
+            for obj in bucket.objects.filter(Prefix=self.entry_directory_name):
                 buffer = io.BytesIO()
                 path, filename = obj.key.rsplit('/', 1)
                 bucket.download_fileobj(obj.key, buffer)
