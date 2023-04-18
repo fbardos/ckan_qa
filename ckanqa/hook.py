@@ -212,13 +212,13 @@ class GreatExpectationsHook(CkanFilesystemHook):
         context.save_expectation_suite(expectation_suite=suite, expectation_suite_name=suite_name)
         return expectation
 
-    def add_or_update_checkpoint(self, checkpoint_name: str, suite_name: str):
+    def add_or_update_checkpoint(self, checkpoint_name: str, suite_name: str, **kwargs):
         context = self.get_base_data_context()
         checkpoint = context.add_or_update_checkpoint(
             name=checkpoint_name,
             config_version=1,
-            class_name='SimpleCheckpoint',
+            class_name='Checkpoint',
             expectation_suite_name=suite_name,
-            site_names=[self.DATA_DOCS_SITE_NAME],  # Not needed... per default will update all data_docs_sites
+            **kwargs
         )
         return checkpoint

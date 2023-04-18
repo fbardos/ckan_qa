@@ -1,11 +1,12 @@
 """
 Contains Operators for Airflow.
 """
+import json
 import logging
-import os
-from collections.abc import Sequence
-from typing import Optional, Sequence
 
+from typing import Optional, Sequence, List
+
+from airflow.hooks.base import BaseHook
 from airflow.models import Variable
 from great_expectations.core.batch import BatchMarkers, BatchRequest
 from great_expectations.core.expectation_configuration import \
@@ -170,6 +171,38 @@ class GeRunValidator(CkanBaseOperatorMeta):
         }
         return datasource_config
 
+    def _get_simple_checkpoint_actions(self) -> List[dict]:
+        action_list = [
+            {'name': 'store_validation_result', 'action': {'class_name': 'StoreValidationResultAction'}},
+            {'name': 'store_evaluation_params', 'action': {'class_name': 'StoreEvaluationParametersAction'}},
+            {'name': 'update_data_docs', 'action': {'class_name': 'UpdateDataDocsAction'}},
+        ]
+        return action_list
+
+    def _build_mail_action(self) -> dict:
+        smtp_connection_id = Variable.get('CKANQA__SMTP_CONN_ID')
+        smtp_conn = BaseHook.get_connection(smtp_connection_id)
+        action_config = {
+            'name': 'send_mail_on_failure',
+            'action': {
+                'class_name': 'EmailAction',
+                'notify_on': 'failure',
+                'use_tls': True,
+                'use_ssl': False,
+                'renderer': {
+                    'module_name': 'great_expectations.render.renderer.email_renderer',
+                    'class_name': 'EmailRenderer',
+                },
+                'smtp_address': smtp_conn.host,
+                'smtp_port': smtp_conn.port,
+                'sender_login': smtp_conn.login,
+                'sender_password': smtp_conn.password,
+                'sender_alias': json.loads(smtp_conn.get_extra())['sender_alias'],
+                'receiver_emails': Variable.get('CKANQA__MAIL_SENDTO'),
+            }
+        }
+        return action_config
+
     def execute(self, context):
 
         # According to GE Docs, when using an experimental expectation, an import is needed
@@ -221,9 +254,16 @@ class GeRunValidator(CkanBaseOperatorMeta):
         # not supported anymore. Therefore, we have to create a checkpoint first.
         checkpoint_name = ckan_context.build_valiation_checkpoint_name(self.validation_config.validation_name)
         suite_name = self.validation_config.suite_name
+
+        # Build action list
+        action_list = self._get_simple_checkpoint_actions()
+        action_list.append(self._build_mail_action())
+
+        # Add Checkpoint
         _ = hook.add_or_update_checkpoint(
             checkpoint_name=checkpoint_name,
-            suite_name=suite_name
+            suite_name=suite_name,
+            action_list=action_list,
         )
 
         run_name = f'DAG {context.get("dag").safe_dag_id}, VALIDATION {self.validation_config.validation_name}'
